@@ -30,15 +30,6 @@ services:
         target: /app/librechat.yaml
       - ./images:/app/client/public/images
       - ./logs:/app/api/logs
-
-  client:
-    image: nginx:1.27.0-alpine
-    container_name: LibreChat-NGINX
-    ports:
-      - 3002:80
-    depends_on:
-      - api
-    restart: always
   mongodb:
     container_name: chat-mongodb
     # ports:  # Uncomment this to access mongodb from outside docker, not safe in deployment
