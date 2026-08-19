@@ -1,28 +1,14 @@
-import { useState } from 'react';
-import { BookmarkPlusIcon } from 'lucide-react';
-import { useConversationTagsQuery } from '~/data-provider';
-import { Button } from '~/components/ui';
 import { BookmarkContext } from '~/Providers/BookmarkContext';
-import { BookmarkEditDialog } from '~/components/Bookmarks';
+import { useConversationTagsQuery } from '~/data-provider';
 import BookmarkTable from './BookmarkTable';
-import { useLocalize } from '~/hooks';
 
 const BookmarkPanel = () => {
-  const localize = useLocalize();
-  const { data } = useConversationTagsQuery();
-  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useConversationTagsQuery();
 
   return (
-    <div className="h-auto max-w-full overflow-x-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden pt-2">
       <BookmarkContext.Provider value={{ bookmarks: data || [] }}>
-        <BookmarkTable />
-        <div className="flex justify-between gap-2">
-          <BookmarkEditDialog context="BookmarkPanel" open={open} setOpen={setOpen} />
-          <Button variant="outline" className="w-full gap-2 text-sm" onClick={() => setOpen(!open)}>
-            <BookmarkPlusIcon className="size-4" />
-            <div className="break-all">{localize('com_ui_bookmarks_new')}</div>
-          </Button>
-        </div>
+        <BookmarkTable isLoading={isLoading} />
       </BookmarkContext.Provider>
     </div>
   );

@@ -1,9 +1,9 @@
-import type { TFile } from 'librechat-data-provider';
-import { FileIcon, PlusIcon } from 'lucide-react';
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { DotsIcon, TrashIcon } from '~/components/svg';
-import { Button } from '~/components/ui';
+import { FileIcon, PlusIcon } from 'lucide-react';
+import { Button, DotsIcon, TrashIcon } from '@librechat/client';
+import type { TFile } from 'librechat-data-provider';
+import useLocalize from '~/hooks/useLocalize';
 
 type FileListItemProps = {
   file: TFile;
@@ -17,6 +17,7 @@ export default function FileListItem2({
   attachedVectorStores,
 }: FileListItemProps) {
   const navigate = useNavigate();
+  const localize = useLocalize();
 
   return (
     <div
@@ -42,7 +43,7 @@ export default function FileListItem2({
                 >
                   <PlusIcon className="h-3 w-3" />
                   &nbsp;
-                  {attachedVectorStores.length - index} more
+                  {localize('com_ui_more_count', { 0: attachedVectorStores.length - index })}
                 </span>
               );
             }
@@ -62,7 +63,7 @@ export default function FileListItem2({
       </div>
       <div className="mr-0 flex w-2/12 flex-col items-center justify-evenly sm:mr-4 md:flex-row">
         <Button className="w-min content-center bg-transparent text-gray-500 hover:bg-slate-200">
-          <DotsIcon className="text-grey-100" />
+          <DotsIcon className="text-text-tertiary" />
         </Button>
         <Button
           className="w-min bg-transparent text-[#666666] hover:bg-slate-200"

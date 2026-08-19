@@ -1,7 +1,16 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Label, Button, OGDialog, OGDialogTrigger, Spinner } from '~/components';
-import OGDialogTemplate from '~/components/ui/OGDialogTemplate';
-import { useOnClickOutside, useLocalize } from '~/hooks';
+import {
+  OGDialogTemplate,
+  Label,
+  Button,
+  OGDialog,
+  OGDialogTrigger,
+  Spinner,
+  InfoHoverCard,
+  useOnClickOutside,
+} from '@librechat/client';
+import { useLocalize } from '~/hooks';
+import { ESide } from '~/common';
 
 export const DeleteCache = ({ disabled = false }: { disabled?: boolean }) => {
   const localize = useLocalize();
@@ -31,14 +40,17 @@ export const DeleteCache = ({ disabled = false }: { disabled?: boolean }) => {
 
   return (
     <div className="flex items-center justify-between">
-      <Label className="font-light">{localize('com_nav_delete_cache_storage')}</Label>
+      <div className="flex items-center gap-1.5">
+        <Label id="delete-cache-label">{localize('com_nav_delete_cache_storage')}</Label>
+        <InfoHoverCard side={ESide.Top} text={localize('com_nav_delete_cache_storage_info')} />
+      </div>
       <OGDialog open={open} onOpenChange={setOpen}>
         <OGDialogTrigger asChild>
           <Button
             variant="destructive"
-            className="flex items-center justify-center rounded-lg transition-colors duration-200"
             onClick={() => setOpen(true)}
             disabled={disabled || isCacheEmpty}
+            aria-labelledby="delete-cache-label"
           >
             {localize('com_ui_delete')}
           </Button>
@@ -55,7 +67,7 @@ export const DeleteCache = ({ disabled = false }: { disabled?: boolean }) => {
           selection={{
             selectHandler: revokeAllUserKeys,
             selectClasses:
-              'bg-destructive text-white transition-all duration-200 hover:bg-destructive/80',
+              'bg-surface-destructive text-white transition-all duration-200 hover:bg-surface-destructive-hover',
             selectText: isLoading ? <Spinner /> : localize('com_ui_delete'),
           }}
         />

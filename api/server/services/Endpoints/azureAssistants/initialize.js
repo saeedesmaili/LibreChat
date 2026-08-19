@@ -1,19 +1,13 @@
 const OpenAI = require('openai');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 const {
-  ErrorTypes,
-  EModelEndpoint,
+  isUserProvided,
   resolveHeaders,
-  mapModelToAzureConfig,
-} = require('librechat-data-provider');
-const {
-  getUserKeyValues,
-  getUserKeyExpiry,
+  constructAzureURL,
   checkUserKeyExpiry,
-} = require('~/server/services/UserService');
-const OpenAIClient = require('~/app/clients/OpenAIClient');
-const { isUserProvided } = require('~/server/utils');
-const { constructAzureURL } = require('~/utils');
+  getProxyDispatcher,
+} = require('@librechat/api');
+const { ErrorTypes, EModelEndpoint, mapModelToAzureConfig } = require('librechat-data-provider');
+const { getUserKeyValues, getUserKeyExpiry } = require('~/models');
 
 class Files {
   constructor(client) {
@@ -54,6 +48,7 @@ class Files {
 }
 
 const initializeClient = async ({ req, res, version, endpointOption, initAppClient = false }) => {
+  const appConfig = req.config;
   const { PROXY, OPENAI_ORGANIZATION, AZURE_ASSISTANTS_API_KEY, AZURE_ASSISTANTS_BASE_URL } =
     process.env;
 
@@ -87,7 +82,7 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
   };
 
   /** @type {TAzureConfig | undefined} */
-  const azureConfig = req.app.locals[EModelEndpoint.azureOpenAI];
+  const azureConfig = appConfig.endpoints?.[EModelEndpoint.azureOpenAI];
 
   /** @type {AzureOptions | undefined} */
   let azureOptions;
@@ -116,9 +111,13 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
     apiKey = azureOptions.azureOpenAIApiKey;
     opts.defaultQuery = { 'api-version': azureOptions.azureOpenAIApiVersion };
     opts.defaultHeaders = resolveHeaders({
-      ...headers,
-      'api-key': apiKey,
-      'OpenAI-Beta': `assistants=${version}`,
+      headers: {
+        ...headers,
+        'api-key': apiKey,
+        'OpenAI-Beta': `assistants=${version}`,
+      },
+      user: req.user,
+      stripUnresolved: true,
     });
     opts.model = azureOptions.azureOpenAIApiDeploymentName;
 
@@ -130,7 +129,6 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
       const groupName = modelGroupMap[modelName].group;
       clientOptions.addParams = azureConfig.groupMap[groupName].addParams;
       clientOptions.dropParams = azureConfig.groupMap[groupName].dropParams;
-      clientOptions.forcePrompt = azureConfig.groupMap[groupName].forcePrompt;
 
       clientOptions.reverseProxyUrl = baseURL ?? clientOptions.reverseProxyUrl;
       clientOptions.headers = opts.defaultHeaders;
@@ -160,8 +158,11 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
     opts.baseURL = baseURL;
   }
 
-  if (PROXY) {
-    opts.httpAgent = new HttpsProxyAgent(PROXY);
+  const proxyDispatcher = getProxyDispatcher(PROXY);
+  if (proxyDispatcher) {
+    opts.fetchOptions = {
+      dispatcher: proxyDispatcher,
+    };
   }
 
   if (OPENAI_ORGANIZATION) {
@@ -181,15 +182,6 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
 
   if (azureOptions) {
     openai.locals = { ...(openai.locals ?? {}), azureOptions };
-  }
-
-  if (endpointOption && initAppClient) {
-    const client = new OpenAIClient(apiKey, clientOptions);
-    return {
-      client,
-      openai,
-      openAIApiKey: apiKey,
-    };
   }
 
   return {

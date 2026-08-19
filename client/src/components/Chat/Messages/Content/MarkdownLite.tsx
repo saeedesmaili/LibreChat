@@ -6,14 +6,15 @@ import supersub from 'remark-supersub';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import type { PluggableList } from 'unified';
-import { code, codeNoExecution, a, p } from './Markdown';
-import { CodeBlockProvider } from '~/Providers';
-import { langSubset } from '~/utils';
+import { code, codeNoExecution, a, p, img, table } from './MarkdownComponents';
+import { CodeBlockProvider, ArtifactProvider } from '~/Providers';
+import MarkdownErrorBoundary from './MarkdownErrorBoundary';
+import { langSubset, remarkApproxTilde } from '~/utils';
 
 const MarkdownLite = memo(
   ({ content = '', codeExecution = true }: { content?: string; codeExecution?: boolean }) => {
     const rehypePlugins: PluggableList = [
-      [rehypeKatex, { output: 'mathml' }],
+      [rehypeKatex],
       [
         rehypeHighlight,
         {
@@ -25,30 +26,36 @@ const MarkdownLite = memo(
     ];
 
     return (
-      <CodeBlockProvider>
-        <ReactMarkdown
-          remarkPlugins={[
-            /** @ts-ignore */
-            supersub,
-            remarkGfm,
-            [remarkMath, { singleDollarTextMath: true }],
-          ]}
-          /** @ts-ignore */
-          rehypePlugins={rehypePlugins}
-          // linkTarget="_new"
-          components={
-            {
-              code: codeExecution ? code : codeNoExecution,
-              a,
-              p,
-            } as {
-              [nodeType: string]: React.ElementType;
-            }
-          }
-        >
-          {content}
-        </ReactMarkdown>
-      </CodeBlockProvider>
+      <MarkdownErrorBoundary content={content} codeExecution={codeExecution}>
+        <ArtifactProvider>
+          <CodeBlockProvider>
+            <ReactMarkdown
+              remarkPlugins={[
+                remarkApproxTilde,
+                /** @ts-ignore */
+                supersub,
+                remarkGfm,
+                [remarkMath, { singleDollarTextMath: false }],
+              ]}
+              /** @ts-ignore */
+              rehypePlugins={rehypePlugins}
+              components={
+                {
+                  code: codeExecution ? code : codeNoExecution,
+                  a,
+                  p,
+                  img,
+                  table,
+                } as {
+                  [nodeType: string]: React.ElementType;
+                }
+              }
+            >
+              {content}
+            </ReactMarkdown>
+          </CodeBlockProvider>
+        </ArtifactProvider>
+      </MarkdownErrorBoundary>
     );
   },
 );

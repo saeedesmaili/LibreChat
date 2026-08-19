@@ -1,14 +1,14 @@
-import { useRecoilState, useRecoilValue } from 'recoil';
-import { EModelEndpoint } from 'librechat-data-provider';
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRecoilValue } from 'recoil';
 import { useForm } from 'react-hook-form';
+import { Alert, Button, TextareaAutosize } from '@librechat/client';
 import { useUpdateMessageMutation } from 'librechat-data-provider/react-query';
 import type { TEditProps } from '~/common';
-import { useChatContext, useAddedChatContext } from '~/Providers';
-import { TextareaAutosize } from '~/components/ui';
-import { cn, removeFocusRings } from '~/utils';
+import { useMessagesOperations, useMessagesConversation } from '~/Providers';
+import { useGetAddedConvo } from '~/hooks/Chat';
 import { useLocalize } from '~/hooks';
 import Container from './Container';
+import { cn } from '~/utils';
 import store from '~/store';
 
 const EditMessage = ({
@@ -20,24 +20,30 @@ const EditMessage = ({
   siblingIdx,
   setSiblingIdx,
 }: TEditProps) => {
-  const { addedIndex } = useAddedChatContext();
-  const { getMessages, setMessages, conversation } = useChatContext();
-  const [latestMultiMessage, setLatestMultiMessage] = useRecoilState(
-    store.latestMessageFamily(addedIndex),
-  );
+  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [saveError, setSaveError] = useState(false);
+  const { conversation } = useMessagesConversation();
+  const { getMessages, setMessages } = useMessagesOperations();
 
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const { conversationId, parentMessageId, messageId } = message;
-  const { endpoint: _endpoint, endpointType } = conversation ?? { endpoint: null };
-  const endpoint = endpointType ?? _endpoint;
   const updateMessageMutation = useUpdateMessageMutation(conversationId ?? '');
   const localize = useLocalize();
 
   const chatDirection = useRecoilValue(store.chatDirection).toLowerCase();
   const isRTL = chatDirection === 'rtl';
 
-  const { register, handleSubmit, setValue } = useForm({
+  const getAddedConvo = useGetAddedConvo();
+
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    formState: { isDirty, isValid },
+  } = useForm({
+    mode: 'onChange',
     defaultValues: {
       text: text ?? '',
     },
@@ -52,18 +58,33 @@ const EditMessage = ({
     }
   }, []);
 
+  /** `ask` refuses to send while another response is streaming and reports it by
+   *  returning false. Closing the editor regardless would throw the draft away for
+   *  a rerun that never started, so a refused send leaves the editor as it was. */
   const resubmitMessage = (data: { text: string }) => {
     if (message.isCreatedByUser) {
-      ask(
+      const submitted = ask(
         {
           text: data.text,
           parentMessageId,
           conversationId,
         },
         {
-          resubmitFiles: true,
+          overrideFiles: message.files,
+          /** Pills on the edited user message stay visible after save-and-submit;
+           *  carry the picks forward so the new turn primes the same skills
+           *  instead of running unprimed. */
+          overrideManualSkills: message.manualSkills,
+          /** Carry the edited user message's quoted excerpts forward so the new
+           *  turn sends the same referenced context the pills still show. */
+          overrideQuotes: message.quotes,
+          addedConvo: getAddedConvo() || undefined,
         },
       );
+
+      if (submitted === false) {
+        return;
+      }
 
       setSiblingIdx((siblingIdx ?? 0) - 1);
     } else {
@@ -73,15 +94,27 @@ const EditMessage = ({
       if (!parentMessage) {
         return;
       }
-      ask(
+      const submitted = ask(
         { ...parentMessage },
         {
           editedText: data.text,
           editedMessageId: messageId,
           isRegenerate: true,
           isEdited: true,
+          /** Edit-assistant-response flow replays the parent user turn; keep
+           *  the same manual skills so the regenerated response is primed
+           *  identically. */
+          overrideManualSkills: parentMessage.manualSkills,
+          /** Replaying the parent user turn: keep its quoted excerpts so the
+           *  regenerated response is sent the same referenced context. */
+          overrideQuotes: parentMessage.quotes,
+          addedConvo: getAddedConvo() || undefined,
         },
       );
+
+      if (submitted === false) {
+        return;
+      }
 
       setSiblingIdx((siblingIdx ?? 0) - 1);
     }
@@ -89,44 +122,60 @@ const EditMessage = ({
     enterEdit(true);
   };
 
-  const updateMessage = (data: { text: string }) => {
-    const messages = getMessages();
-    if (!messages) {
-      return;
-    }
-    updateMessageMutation.mutate({
-      conversationId: conversationId ?? '',
-      model: conversation?.model ?? 'gpt-3.5-turbo',
-      text: data.text,
-      messageId,
-    });
+  const updateMessage = async (data: { text: string }) => {
+    setSaveError(false);
+    try {
+      await updateMessageMutation.mutateAsync({
+        conversationId: conversationId ?? '',
+        model: conversation?.model ?? 'gpt-3.5-turbo',
+        text: data.text,
+        messageId,
+      });
 
-    if (message.messageId === latestMultiMessage?.messageId) {
-      setLatestMultiMessage({ ...latestMultiMessage, text: data.text });
-    }
+      /** Read the thread after the request, not before it. An earlier turn stays
+       *  editable while the newest answer streams, so a snapshot taken before the
+       *  round trip is already behind by the time it would be written back, and
+       *  writing it wholesale would drop every delta that landed in between. */
+      const messages = getMessages();
+      if (!messages) {
+        enterEdit(true);
+        return;
+      }
 
-    const isInMessages = messages.some((message) => message.messageId === messageId);
-    if (!isInMessages) {
-      message.text = data.text;
-    } else {
-      setMessages(
-        messages.map((msg) =>
-          msg.messageId === messageId
-            ? {
-              ...msg,
-              text: data.text,
-              isEdited: true,
-            }
-            : msg,
-        ),
+      const isInMessages = messages.some(
+        (currentMessage) => currentMessage.messageId === messageId,
       );
-    }
+      if (!isInMessages) {
+        message.text = data.text;
+      } else {
+        setMessages(
+          messages.map((msg) =>
+            msg.messageId === messageId
+              ? {
+                  ...msg,
+                  text: data.text,
+                }
+              : msg,
+          ),
+        );
+      }
 
-    enterEdit(true);
+      enterEdit(true);
+    } catch {
+      setSaveError(true);
+    }
   };
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitButtonRef.current?.click();
+      }
+      if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        saveButtonRef.current?.click();
+      }
       if (e.key === 'Escape') {
         e.preventDefault();
         enterEdit(true);
@@ -136,15 +185,21 @@ const EditMessage = ({
   );
 
   const { ref, ...registerProps } = register('text', {
-    required: true,
+    /** Retained attachments make an otherwise empty edit submittable, matching
+     *  the composer; `ask` replays them through `overrideFiles`. */
+    required: (message.files?.length ?? 0) === 0,
     onChange: (e) => {
-      setValue('text', e.target.value, { shouldValidate: true });
+      setValue('text', e.target.value, { shouldDirty: true, shouldValidate: true });
     },
   });
 
   return (
     <Container message={message}>
-      <div className="bg-token-main-surface-primary relative flex w-full flex-grow flex-col overflow-hidden rounded-2xl border border-border-medium text-text-primary [&:has(textarea:focus)]:border-border-heavy [&:has(textarea:focus)]:shadow-[0_2px_6px_rgba(0,0,0,.05)]">
+      <section
+        aria-label={localize('com_ui_edit_message')}
+        className="mt-2 flex w-full flex-col gap-2"
+      >
+        {saveError && <Alert variant="error">{localize('com_ui_save_message_error')}</Alert>}
         <TextareaAutosize
           {...registerProps}
           ref={(e) => {
@@ -154,37 +209,60 @@ const EditMessage = ({
           onKeyDown={handleKeyDown}
           data-testid="message-text-editor"
           className={cn(
-            'markdown prose dark:prose-invert light whitespace-pre-wrap break-words pl-3 md:pl-4',
-            'm-0 w-full resize-none border-0 bg-transparent py-[10px]',
-            'placeholder-text-secondary focus:ring-0 focus-visible:ring-0 md:py-3.5',
+            'message-editor-text max-h-[65vh] min-h-24 w-full resize-y whitespace-pre-wrap',
+            'break-words rounded-lg border border-border-medium bg-surface-tertiary-alt',
+            'px-3 py-2 text-text-primary',
+            'focus-visible:outline-none',
             isRTL ? 'text-right' : 'text-left',
-            'max-h-[65vh] pr-3 md:max-h-[75vh] md:pr-4',
-            removeFocusRings,
+            'disabled:opacity-50 md:max-h-[75vh]',
           )}
+          aria-label={localize('com_ui_message_input')}
+          aria-keyshortcuts="Control+Enter Meta+Enter Control+S Meta+S Escape"
+          disabled={isSubmitting || updateMessageMutation.isLoading}
           dir={isRTL ? 'rtl' : 'ltr'}
         />
-      </div>
-      <div className="mt-2 flex w-full justify-center text-center">
-        <button
-          className="btn btn-primary relative mr-2"
-          disabled={
-            isSubmitting || (endpoint === EModelEndpoint.google && !message.isCreatedByUser)
-          }
-          onClick={handleSubmit(resubmitMessage)}
-        >
-          {localize('com_ui_save_submit')}
-        </button>
-        <button
-          className="btn btn-secondary relative mr-2"
-          disabled={isSubmitting}
-          onClick={handleSubmit(updateMessage)}
-        >
-          {localize('com_ui_save')}
-        </button>
-        <button className="btn btn-neutral relative" onClick={() => enterEdit(true)}>
-          {localize('com_ui_cancel')}
-        </button>
-      </div>
+        {/* The actions wrap rather than hold one unbreakable row: on a 320px assistant
+            turn the identity column and page padding leave less width than the three
+            English labels need, and a translated label needs more still. */}
+        <footer className="flex flex-wrap items-center justify-between gap-2">
+          <span
+            className="line-clamp-2 min-w-0 flex-1 text-xs text-text-secondary"
+            aria-live="polite"
+          >
+            {isDirty ? localize('com_ui_unsaved_changes') : ''}
+          </span>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => enterEdit(true)}
+              disabled={updateMessageMutation.isLoading}
+            >
+              {localize('com_ui_cancel')}
+            </Button>
+            <Button
+              ref={saveButtonRef}
+              size="sm"
+              variant="outline"
+              disabled={isSubmitting || updateMessageMutation.isLoading || !isDirty || !isValid}
+              onClick={handleSubmit(updateMessage)}
+            >
+              {updateMessageMutation.isLoading
+                ? localize('com_ui_saving')
+                : localize('com_ui_save')}
+            </Button>
+            <Button
+              ref={submitButtonRef}
+              size="sm"
+              variant="submit"
+              disabled={isSubmitting || updateMessageMutation.isLoading || !isDirty || !isValid}
+              onClick={handleSubmit(resubmitMessage)}
+            >
+              {localize('com_ui_update_rerun')}
+            </Button>
+          </div>
+        </footer>
+      </section>
     </Container>
   );
 };

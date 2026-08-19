@@ -1,10 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, memo } from 'react';
 import { useRecoilState } from 'recoil';
-import type { TConversation, TMessage } from 'librechat-data-provider';
-import { EditIcon, Clipboard, CheckMark, ContinueIcon, RegenerateIcon } from '~/components/svg';
+import {
+  Button,
+  EditIcon,
+  CheckMark,
+  Clipboard,
+  ContinueIcon,
+  TooltipAnchor,
+  RegenerateIcon,
+} from '@librechat/client';
+import type { TConversation, TMessage, TFeedback } from 'librechat-data-provider';
 import { useGenerationsByLatest, useLocalize } from '~/hooks';
 import { Fork } from '~/components/Conversations';
+import { hoverButtonClasses } from './styles';
 import MessageAudio from './MessageAudio';
+import Feedback from './Feedback';
 import { cn } from '~/utils';
 import store from '~/store';
 
@@ -12,57 +22,159 @@ type THoverButtons = {
   isEditing: boolean;
   enterEdit: (cancel?: boolean) => void;
   copyToClipboard: (setIsCopied: React.Dispatch<React.SetStateAction<boolean>>) => void;
+  getCanCopy: () => boolean;
   conversation: TConversation | null;
   isSubmitting: boolean;
   message: TMessage;
   regenerate: () => void;
   handleContinue: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  latestMessage: TMessage | null;
+  latestMessageId?: string;
   isLast: boolean;
   index: number;
+  handleFeedback?: ({ feedback }: { feedback: TFeedback | undefined }) => void;
 };
 
-export default function HoverButtons({
+type HoverButtonProps = {
+  id?: string;
+  onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
+  title: string;
+  icon: React.ReactNode;
+  isActive?: boolean;
+  isLast?: boolean;
+  className?: string;
+  buttonStyle?: string;
+  dataTestId?: string;
+  disabled?: boolean;
+};
+
+const extractMessageContent = (message: TMessage): string => {
+  if (typeof message.content === 'string') {
+    return message.content;
+  }
+
+  if (Array.isArray(message.content)) {
+    return message.content
+      .map((part) => {
+        if (part == null) {
+          return '';
+        }
+        if (typeof part === 'string') {
+          return part;
+        }
+        if ('text' in part) {
+          return part.text || '';
+        }
+        if ('think' in part) {
+          const think = part.think;
+          if (typeof think === 'string') {
+            return think;
+          }
+          return think && 'text' in think ? think.text || '' : '';
+        }
+        return '';
+      })
+      .join('');
+  }
+
+  return message.text || '';
+};
+
+const HoverButton = memo(
+  ({
+    id,
+    onClick,
+    title,
+    icon,
+    isActive = false,
+    isLast = false,
+    className = '',
+    dataTestId,
+    disabled = false,
+  }: HoverButtonProps) => {
+    const buttonStyle = hoverButtonClasses({ isActive, isLast, className });
+
+    return (
+      <TooltipAnchor
+        description={title}
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            id={id}
+            data-testid={dataTestId}
+            aria-label={title}
+            className={buttonStyle}
+            onClick={onClick}
+            disabled={disabled}
+          >
+            {icon}
+          </Button>
+        }
+      />
+    );
+  },
+);
+
+HoverButton.displayName = 'HoverButton';
+
+const HoverButtons = ({
   index,
   isEditing,
   enterEdit,
   copyToClipboard,
+  getCanCopy,
   conversation,
   isSubmitting,
   message,
   regenerate,
   handleContinue,
-  latestMessage,
+  latestMessageId,
   isLast,
-}: THoverButtons) {
+  handleFeedback,
+}: THoverButtons) => {
   const localize = useLocalize();
-  const { endpoint: _endpoint, endpointType } = conversation ?? {};
-  const endpoint = endpointType ?? _endpoint;
   const [isCopied, setIsCopied] = useState(false);
   const [TextToSpeech] = useRecoilState<boolean>(store.textToSpeech);
+
+  const endpoint = useMemo(() => {
+    if (!conversation) {
+      return '';
+    }
+    return conversation.endpointType ?? conversation.endpoint;
+  }, [conversation]);
+
+  const generationCapabilities = useGenerationsByLatest({
+    isEditing,
+    isSubmitting,
+    error: message.error,
+    endpoint: endpoint ?? '',
+    messageId: message.messageId,
+    searchResult: message.searchResult,
+    finish_reason: message.finish_reason,
+    isCreatedByUser: message.isCreatedByUser,
+    latestMessageId: latestMessageId,
+  });
 
   const {
     hideEditButton,
     regenerateEnabled,
     continueSupported,
     forkingSupported,
+    isActiveStreamingMessage,
     isEditableEndpoint,
-  } = useGenerationsByLatest({
-    isEditing,
-    isSubmitting,
-    message,
-    endpoint: endpoint ?? '',
-    latestMessage,
-  });
+  } = generationCapabilities;
+
+  const canCopy = useMemo(
+    () => !isActiveStreamingMessage && getCanCopy(),
+    [isActiveStreamingMessage, getCanCopy],
+  );
+
   if (!conversation) {
     return null;
   }
 
   const { isCreatedByUser, error } = message;
-
-  if (error) {
-    return null;
-  }
+  const isSubagentThreadReadOnly = conversation.subagentThread != null;
 
   const onEdit = () => {
     if (isEditing) {
@@ -71,84 +183,104 @@ export default function HoverButtons({
     enterEdit();
   };
 
+  const handleCopy = () => copyToClipboard(setIsCopied);
+
   return (
-    <div className="visible mt-0 flex justify-center gap-1 self-end text-gray-500 lg:justify-start">
-      {TextToSpeech && (
+    <div className="group visible flex justify-center gap-0.5 self-end focus-within:outline-none lg:justify-start">
+      {/* Text to Speech */}
+      {TextToSpeech && !error && !isActiveStreamingMessage && (
         <MessageAudio
           index={index}
-          messageId={message.messageId}
-          content={message.content ?? message.text}
           isLast={isLast}
-          className="hover-button rounded-md p-1 pl-0 text-gray-500 hover:bg-gray-100 hover:text-gray-500 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible"
+          messageId={message.messageId}
+          content={extractMessageContent(message)}
+          renderButton={(props) => (
+            <HoverButton
+              onClick={props.onClick}
+              title={props.title}
+              icon={props.icon}
+              isActive={props.isActive}
+              isLast={isLast}
+              dataTestId={isLast && !isCreatedByUser ? 'read-aloud-button' : undefined}
+            />
+          )}
         />
       )}
-      {isEditableEndpoint && (
-        <button
+
+      {/* Copy Button */}
+      {!isActiveStreamingMessage && (
+        <HoverButton
+          onClick={handleCopy}
+          title={
+            isCopied ? localize('com_ui_copied_to_clipboard') : localize('com_ui_copy_to_clipboard')
+          }
+          icon={isCopied ? <CheckMark className="h-[18px] w-[18px]" /> : <Clipboard size="19" />}
+          isLast={isLast}
+          disabled={!canCopy}
           className={cn(
-            'hover-button rounded-md p-1 hover:bg-gray-100 hover:text-gray-500 focus:opacity-100 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-            isCreatedByUser ? '' : 'active',
-            hideEditButton ? 'opacity-0' : '',
-            isEditing ? 'active text-gray-700 dark:text-gray-200' : '',
-            !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
+            'ml-0 flex items-center gap-1.5 text-xs',
+            isSubmitting && isCreatedByUser
+              ? 'group-hover:opacity-100 [@media(hover:hover)]:opacity-0'
+              : '',
           )}
-          onClick={onEdit}
-          type="button"
-          title={localize('com_ui_edit')}
-          disabled={hideEditButton}
-        >
-          <EditIcon size="19" />
-        </button>
+          dataTestId={!isCreatedByUser ? 'copy-response-button' : undefined}
+        />
       )}
-      <button
-        className={cn(
-          'ml-0 flex items-center gap-1.5 rounded-md p-1 text-xs hover:bg-gray-100 hover:text-gray-500 focus:opacity-100 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-          isSubmitting && isCreatedByUser ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-          !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-        )}
-        onClick={() => copyToClipboard(setIsCopied)}
-        type="button"
-        title={
-          isCopied ? localize('com_ui_copied_to_clipboard') : localize('com_ui_copy_to_clipboard')
-        }
-      >
-        {isCopied ? <CheckMark className="h-[18px] w-[18px]" /> : <Clipboard size="19" />}
-      </button>
-      {regenerateEnabled ? (
-        <button
-          className={cn(
-            'hover-button active rounded-md p-1 hover:bg-gray-100 hover:text-gray-500 focus:opacity-100 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:invisible md:group-hover:visible md:group-[.final-completion]:visible',
-            !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-          )}
+
+      {/* Edit Button */}
+      {!isSubagentThreadReadOnly && isEditableEndpoint && !hideEditButton && (
+        <HoverButton
+          id={`edit-${message.messageId}`}
+          onClick={onEdit}
+          title={localize('com_ui_edit')}
+          icon={<EditIcon size="19" />}
+          isActive={isEditing}
+          isLast={isLast}
+          className={isCreatedByUser ? '' : 'active'}
+        />
+      )}
+
+      {/* Fork Button */}
+      {!error && !isActiveStreamingMessage && (
+        <Fork
+          messageId={message.messageId}
+          conversationId={conversation.conversationId}
+          forkingSupported={forkingSupported}
+          latestMessageId={latestMessageId}
+          isLast={isLast}
+        />
+      )}
+
+      {/* Feedback Buttons */}
+      {!error && !isActiveStreamingMessage && !isCreatedByUser && handleFeedback != null && (
+        <Feedback handleFeedback={handleFeedback} feedback={message.feedback} isLast={isLast} />
+      )}
+
+      {/* Regenerate Button */}
+      {!isSubagentThreadReadOnly && regenerateEnabled && (
+        <HoverButton
           onClick={regenerate}
-          type="button"
           title={localize('com_ui_regenerate')}
-        >
-          <RegenerateIcon
-            className="hover:text-gray-500 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400"
-            size="19"
-          />
-        </button>
-      ) : null}
-      <Fork
-        isLast={isLast}
-        messageId={message.messageId}
-        conversationId={conversation.conversationId}
-        forkingSupported={forkingSupported}
-        latestMessage={latestMessage}
-      />
-      {continueSupported === true ? (
-        <button
-          className={cn(
-            'hover-button active rounded-md p-1 hover:bg-gray-100 hover:text-gray-500 focus:opacity-100 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:invisible md:group-hover:visible',
-            !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-          )}
-          onClick={handleContinue}
-          type="button"
+          icon={<RegenerateIcon size="19" />}
+          isLast={isLast}
+          dataTestId={isLast ? 'regenerate-generation-button' : undefined}
+          className="active"
+        />
+      )}
+
+      {/* Continue Button */}
+      {!isSubagentThreadReadOnly && continueSupported && (
+        <HoverButton
+          onClick={(e) => e && handleContinue(e)}
           title={localize('com_ui_continue')}
-        >
-          <ContinueIcon className="h-4 w-4 hover:text-gray-500 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400" />
-        </button>
-      ) : null}
+          icon={<ContinueIcon className="w-19 h-19 -rotate-180" />}
+          isLast={isLast}
+          dataTestId={isLast ? 'continue-generation-button' : undefined}
+          className="active"
+        />
+      )}
     </div>
   );
-}
+};
+
+export default memo(HoverButtons);

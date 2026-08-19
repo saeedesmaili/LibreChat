@@ -1,8 +1,16 @@
 import type { OpenAPIV3 } from 'openapi-types';
-import type { AssistantsEndpoint, AgentProvider } from 'src/schemas';
+import type { AssistantsEndpoint, AgentProvider, MemoryScope } from 'src/schemas';
+import type { StatefulCodeEnvironment } from '../stateful-code';
+import type { Agents, GraphEdge } from './agents';
 import type { ContentTypes } from './runs';
-import type { Agents } from './agents';
 import type { TFile } from './files';
+import { ArtifactModes } from 'src/artifacts';
+export {
+  STATEFUL_CODE_ENVIRONMENTS,
+  resolveStatefulCodeEnvironment,
+  resolveAllowedStatefulCodeEnvironments,
+} from '../stateful-code';
+export type { StatefulCodeEnvironment } from '../stateful-code';
 
 export type Schema = OpenAPIV3.SchemaObject & { description?: string };
 export type Reference = OpenAPIV3.ReferenceObject & { description?: string };
@@ -18,14 +26,23 @@ export enum Tools {
   execute_code = 'execute_code',
   code_interpreter = 'code_interpreter',
   file_search = 'file_search',
+  web_search = 'web_search',
   retrieval = 'retrieval',
   function = 'function',
+  memory = 'memory',
+  ui_resources = 'ui_resources',
+  skill = 'skill',
+  read_file = 'read_file',
+  bash_tool = 'bash_tool',
 }
 
 export enum EToolResources {
   code_interpreter = 'code_interpreter',
   execute_code = 'execute_code',
   file_search = 'file_search',
+  image_edit = 'image_edit',
+  context = 'context',
+  ocr = 'ocr',
 }
 
 export type Tool = {
@@ -38,6 +55,8 @@ export type FunctionTool = {
     description: string;
     name: string;
     parameters: Record<string, unknown>;
+    strict?: boolean;
+    additionalProperties?: boolean; // must be false if strict is true https://platform.openai.com/docs/guides/structured-outputs/some-type-specific-keywords-are-not-yet-supported
   };
 };
 
@@ -100,6 +119,7 @@ export type AssistantCreateParams = {
   tools?: Array<FunctionTool | string>;
   endpoint: AssistantsEndpoint;
   version: number | string;
+  append_current_datetime?: boolean;
 };
 
 export type AssistantUpdateParams = {
@@ -113,6 +133,7 @@ export type AssistantUpdateParams = {
   tools?: Array<FunctionTool | string>;
   tool_resources?: ToolResources;
   endpoint: AssistantsEndpoint;
+  append_current_datetime?: boolean;
 };
 
 export type AssistantListParams = {
@@ -144,26 +165,23 @@ export type File = {
 
 /* Agent types */
 
-export type AgentParameterValue = number | null;
+export type AgentParameterValue = number | string | null;
 
 export type AgentModelParameters = {
   model?: string;
   temperature: AgentParameterValue;
+  maxContextTokens: AgentParameterValue;
   max_context_tokens: AgentParameterValue;
   max_output_tokens: AgentParameterValue;
   top_p: AgentParameterValue;
   frequency_penalty: AgentParameterValue;
   presence_penalty: AgentParameterValue;
+  useResponsesApi?: boolean;
 };
 
-export interface AgentToolResources {
-  execute_code?: ExecuteCodeResource;
-  file_search?: AgentFileSearchResource;
-}
-export interface ExecuteCodeResource {
+export interface AgentBaseResource {
   /**
-   * A list of file IDs made available to the `execute_code` tool.
-   * There can be a maximum of 20 files associated with the tool.
+   * A list of file IDs made available to the tool.
    */
   file_ids?: Array<string>;
   /**
@@ -172,24 +190,125 @@ export interface ExecuteCodeResource {
   files?: Array<TFile>;
 }
 
-export interface AgentFileSearchResource {
+export interface AgentToolResources {
+  [EToolResources.image_edit]?: AgentBaseResource;
+  [EToolResources.execute_code]?: ExecuteCodeResource;
+  [EToolResources.file_search]?: AgentFileResource;
+  [EToolResources.context]?: AgentBaseResource;
+  /** @deprecated Use context instead */
+  [EToolResources.ocr]?: AgentBaseResource;
+}
+/**
+ * A resource for the execute_code tool.
+ * Contains file IDs made available to the tool (max 20 files) and already fetched files.
+ */
+export type ExecuteCodeResource = AgentBaseResource;
+
+export interface AgentFileResource extends AgentBaseResource {
   /**
    * The ID of the vector store attached to this agent. There
    * can be a maximum of 1 vector store attached to the agent.
    */
   vector_store_ids?: Array<string>;
-  /**
-   * A list of file IDs made available to the `file_search` tool.
-   * To be used before vector stores are implemented.
-   */
-  file_ids?: Array<string>;
-  /**
-   * A list of files already fetched.
-   */
-  files?: Array<TFile>;
 }
+export type SupportContact = {
+  name?: string;
+  email?: string;
+};
+
+export type AgentOwnerContact = {
+  name?: string;
+};
+
+/**
+ * Specifies who can invoke a tool.
+ * - 'direct': LLM can call directly
+ * - 'code_execution': Only callable via programmatic tool calling (PTC)
+ */
+export type AllowedCaller = 'direct' | 'code_execution';
+
+/**
+ * Per-tool configuration options stored at the agent level.
+ * Keyed by tool_id (e.g., "search_mcp_github").
+ */
+export type ToolOptions = {
+  /**
+   * If true, the tool uses deferred loading (discoverable via tool search).
+   * @default false
+   */
+  defer_loading?: boolean;
+  /**
+   * Specifies who can invoke this tool.
+   * - 'direct': LLM can call directly (default behavior)
+   * - 'code_execution': Only callable via PTC sandbox
+   * @default ['direct']
+   */
+  allowed_callers?: AllowedCaller[];
+  /**
+   * If true (and the `run_in_background` capability is enabled), the tool's
+   * schema gains a `run_in_background` boolean so the model can dispatch the
+   * call detached and poll its result via `check_background_task`.
+   * @default false
+   */
+  run_in_background?: boolean;
+  /**
+   * If true (and the `tool_intents` capability is enabled), the tool's schema
+   * gains an `intent` string as its FIRST property — one model-authored
+   * sentence per call, rendered as the call's live status label. Native host
+   * tools default on while the capability is enabled; `false` opts one out.
+   * @default false
+   */
+  describe_intent?: boolean;
+};
+
+/**
+ * Map of tool_id to its configuration options.
+ * Used to customize tool behavior per agent.
+ */
+export type AgentToolOptions = Record<string, ToolOptions>;
+
+/**
+ * Configuration for spawning subagents (isolated-context child agents) from an agent.
+ * When `enabled` is true, the agent gets a subagent-spawn tool that can delegate work
+ * to itself, listed single-agent targets, and/or explicit saved-agent teams.
+ */
+export type AgentSubagentGraphEdge = Omit<
+  GraphEdge,
+  'edgeType' | 'condition' | 'prompt' | 'promptKey'
+> & {
+  edgeType: 'direct';
+  condition?: never;
+  prompt?: string;
+  promptKey?: never;
+};
+
+/** A bounded saved-agent team that can be spawned as one isolated child graph. */
+export type AgentSubagentGraph = {
+  /** Stable spawn-tool enum value for the team. */
+  type: string;
+  name: string;
+  description: string;
+  /** Member IDs. In create/update payloads, an empty ID refers to the current agent. */
+  agent_ids: string[];
+  edges: AgentSubagentGraphEdge[];
+  /** Entry member ID. In create/update payloads, an empty ID refers to the current agent. */
+  entry_agent_id: string;
+  /** Result member ID. In create/update payloads, an empty ID refers to the current agent. */
+  result_agent_id: string;
+};
+
+export type AgentSubagentsConfig = {
+  enabled?: boolean;
+  /** When true (default), the agent may spawn itself in an isolated context. */
+  allowSelf?: boolean;
+  /** Specific agents that may be spawned as subagents. */
+  agent_ids?: string[];
+  /** Explicit saved-agent teams that may be spawned as bounded child graphs. */
+  graphs?: AgentSubagentGraph[];
+};
 
 export type Agent = {
+  _id?: string;
   id: string;
   name: string | null;
   author?: string | null;
@@ -199,20 +318,56 @@ export type Agent = {
   description: string | null;
   created_at: number;
   avatar: AgentAvatar | null;
-  instructions: string | null;
+  instructions?: string | null;
+  additional_instructions?: string | null;
   tools?: string[];
-  projectIds?: string[];
   tool_kwargs?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   provider: AgentProvider;
   model: string | null;
   model_parameters: AgentModelParameters;
   conversation_starters?: string[];
-  isCollaborative?: boolean;
   tool_resources?: AgentToolResources;
+  /** @deprecated Use edges instead */
   agent_ids?: string[];
+  edges?: GraphEdge[];
   end_after_tools?: boolean;
   hide_sequential_outputs?: boolean;
+  /** Per-agent opt-in for stateful code sessions (requires the app-level capability). */
+  stateful_code_sessions?: boolean;
+  /** Stateful workspace sharing scope. Defaults to one workspace per user. */
+  stateful_code_environment?: StatefulCodeEnvironment;
+  artifacts?: ArtifactModes;
+  recursion_limit?: number;
+  isPublic?: boolean;
+  /**
+   * Whether the requesting user holds EDIT on this agent, so a single VIEW-scoped fetch can
+   * serve consumers that only need the editable subset instead of issuing a second full
+   * paginated walk under an EDIT-scoped cache key.
+   *
+   * Set by the list endpoint only; single-agent responses omit it. Treat absence as unknown
+   * and fail open (`isEditable !== false`), never as `false`, since a client on an older
+   * server would otherwise see an empty list rather than too many rows.
+   *
+   * Reflects the caller's ACL grant. The `MANAGE_AGENTS` capability bypasses ACL on write,
+   * so a capability holder can edit agents this flag reports as not editable.
+   */
+  isEditable?: boolean;
+  version?: number;
+  category?: string;
+  support_contact?: SupportContact;
+  owner_contact?: AgentOwnerContact;
+  /** Per-tool configuration options (deferred loading, allowed callers, etc.) */
+  tool_options?: AgentToolOptions;
+  /** Optional allowlist of skill ObjectIds. Only applies when `skills_enabled`. */
+  skills?: string[];
+  /** Master toggle for skill use on this agent. `true` = active (full catalog unless
+   *  `skills` narrows it). `false`/undefined = inactive (no skills available). */
+  skills_enabled?: boolean;
+  /** Subagent spawning configuration — isolated-context child agents. */
+  subagents?: AgentSubagentsConfig;
+  /** Memory partition: `agent` isolates memories per (user, agent); default shared pool */
+  memory_scope?: MemoryScope;
 };
 
 export type TAgentsMap = Record<string, Agent | undefined>;
@@ -227,7 +382,24 @@ export type AgentCreateParams = {
   provider: AgentProvider;
   model: string | null;
   model_parameters: AgentModelParameters;
-} & Pick<Agent, 'agent_ids' | 'end_after_tools' | 'hide_sequential_outputs'>;
+} & Pick<
+  Agent,
+  | 'agent_ids'
+  | 'edges'
+  | 'end_after_tools'
+  | 'hide_sequential_outputs'
+  | 'stateful_code_sessions'
+  | 'stateful_code_environment'
+  | 'artifacts'
+  | 'recursion_limit'
+  | 'category'
+  | 'support_contact'
+  | 'tool_options'
+  | 'skills'
+  | 'skills_enabled'
+  | 'subagents'
+  | 'memory_scope'
+>;
 
 export type AgentUpdateParams = {
   name?: string | null;
@@ -240,17 +412,32 @@ export type AgentUpdateParams = {
   provider?: AgentProvider;
   model?: string | null;
   model_parameters?: AgentModelParameters;
-  projectIds?: string[];
-  removeProjectIds?: string[];
-  isCollaborative?: boolean;
-} & Pick<Agent, 'agent_ids' | 'end_after_tools' | 'hide_sequential_outputs'>;
+} & Pick<
+  Agent,
+  | 'agent_ids'
+  | 'edges'
+  | 'end_after_tools'
+  | 'hide_sequential_outputs'
+  | 'stateful_code_sessions'
+  | 'stateful_code_environment'
+  | 'artifacts'
+  | 'recursion_limit'
+  | 'category'
+  | 'support_contact'
+  | 'tool_options'
+  | 'skills'
+  | 'skills_enabled'
+  | 'subagents'
+  | 'memory_scope'
+>;
 
 export type AgentListParams = {
   limit?: number;
-  before?: string | null;
-  after?: string | null;
-  order?: 'asc' | 'desc';
-  provider?: AgentProvider;
+  requiredPermission: number;
+  category?: string;
+  search?: string;
+  cursor?: string;
+  promoted?: 0 | 1;
 };
 
 export type AgentListResponse = {
@@ -259,6 +446,7 @@ export type AgentListResponse = {
   first_id: string;
   last_id: string;
   has_more: boolean;
+  after?: string;
 };
 
 export type AgentFile = {
@@ -415,7 +603,45 @@ export type PartMetadata = {
   asset_pointer?: string;
   status?: string;
   action?: boolean;
+  auth?: string;
+  expires_at?: number;
+  /** Index indicating parallel sibling content (same stepIndex in multi-agent runs) */
+  siblingIndex?: number;
+  /** Agent ID for parallel agent rendering - identifies which agent produced this content */
+  agentId?: string;
+  /** Group ID for parallel content - parts with same groupId are displayed in columns */
+  groupId?: number;
+  /**
+   * Terminal lifecycle status of the run step that produced this part, from
+   * `on_run_step_closed`. Distinct from `status`, which is already claimed by
+   * activity-label and question-form parts. Absent on parts predating the
+   * event or from endpoints that do not emit it, in which case renderers fall
+   * back to inferring "stopped" from `progress` and `isSubmitting`.
+   */
+  runStepStatus?: Agents.RunStepClosedStatus;
+  /**
+   * Wall-clock milliseconds the run step took, derived from the same
+   * `on_run_step_closed` event as {@link runStepStatus} via
+   * `getRunStepDurationMs`. Only written when the event carried both
+   * timestamps and they agree in order — so its absence means "not
+   * derivable", never "instant". The raw value is persisted unfiltered;
+   * whether it is worth showing (`isReportableRunStepDuration`) is decided
+   * at render time.
+   */
+  runStepDurationMs?: number;
+  /**
+   * Stamped by the background harvester when a detached task's final output
+   * replaces the dispatch handle in `tool_call.output`. The handle JSON and
+   * the live status-marker attachment are both transient, so after the patch
+   * (or a reload) this is the only signal that the call ran in the
+   * background — renderers use it to keep treating {@link runStepDurationMs}
+   * as dispatch time rather than the task's runtime.
+   */
+  backgrounded?: boolean;
 };
+
+/** Metadata for parallel content rendering - subset of PartMetadata */
+export type ContentMetadata = Pick<PartMetadata, 'agentId' | 'groupId'>;
 
 export type ContentPart = (
   | CodeToolCall
@@ -428,10 +654,72 @@ export type ContentPart = (
 ) &
   PartMetadata;
 
+export type TextData = (Text & PartMetadata) | undefined;
+
+export type SummaryContentPart = {
+  type: ContentTypes.SUMMARY;
+  content?: Array<{ type: ContentTypes.TEXT; text: string }>;
+  tokenCount?: number;
+  summarizing?: boolean;
+  summaryVersion?: number;
+  model?: string;
+  provider?: string;
+  createdAt?: string;
+  boundary?: {
+    messageId: string;
+    contentIndex: number;
+  };
+};
+
+/**
+ * A user steering message injected mid-run at a tool-batch boundary.
+ * Persisted inline in the response message's content array (keyed by the
+ * type name like `text`/`think` so token counting reads it for free);
+ * replayed as a user message on subsequent turns by `formatAgentMessages`.
+ */
+export type SteerContentPart = {
+  type: ContentTypes.STEER;
+  steer: string;
+  steerId?: string;
+  /** Stable optimistic-client id used to settle a POST whose response was lost. */
+  clientSteerId?: string;
+  createdAt?: number;
+  /** Attachments steered with the message; re-encoded per turn on replay
+   *  like any other user-message media (refs only, never encoded data). */
+  files?: Partial<TFile>[];
+};
+
 export type TMessageContentParts =
-  | { type: ContentTypes.ERROR; text: Text & PartMetadata }
-  | { type: ContentTypes.TEXT; text: string | (Text & PartMetadata); tool_call_ids?: string[] }
-  | {
+  | ({
+      type: ContentTypes.ERROR;
+      text?: string | TextData;
+      error?: string;
+    } & ContentMetadata)
+  | ({
+      type: ContentTypes.THINK;
+      think?: string | TextData;
+      /** Generated orientation for this user-visible reasoning step. */
+      reasoning_label?: string;
+      /** Stable SDK run-step identity used to correlate live revisions. */
+      reasoning_label_step_id?: string;
+      /** Durable provider-call count used to enforce the per-run cost cap across resumes. */
+      reasoning_label_attempts?: number;
+      /** Visible reasoning length included in this step's latest provider call. */
+      reasoning_label_submitted_chars?: number;
+      /** Monotonic provider-call revision; gaps are allowed after unsuccessful attempts. */
+      reasoning_label_revision?: number;
+      /** Whether the reasoning step can still produce a newer label. */
+      reasoning_label_status?: 'streaming' | 'complete';
+    } & ContentMetadata)
+  | (SteerContentPart & ContentMetadata)
+  | ({
+      type: ContentTypes.TEXT;
+      text?: string | TextData;
+      tool_call_ids?: string[];
+      /** Open Responses semantic channel for assistant text. */
+      phase?: 'commentary' | 'final_answer';
+    } & ContentMetadata)
+  | ({
       type: ContentTypes.TOOL_CALL;
       tool_call: (
         | CodeToolCall
@@ -441,9 +729,31 @@ export type TMessageContentParts =
         | Agents.AgentToolCall
       ) &
         PartMetadata;
-    }
-  | { type: ContentTypes.IMAGE_FILE; image_file: ImageFile & PartMetadata }
-  | Agents.MessageContentImageUrl;
+    } & ContentMetadata)
+  | ({ type: ContentTypes.IMAGE_FILE; image_file: ImageFile & PartMetadata } & ContentMetadata)
+  | (SummaryContentPart & ContentMetadata)
+  | ({
+      /** One-line LLM-generated note describing a completed tool batch. UI-only:
+       *  never sent to the model (stripped before payload formatting). */
+      type: ContentTypes.ACTIVITY_LABEL;
+      activity_label?: string;
+      /** Missing means the legacy/per-batch activity label. */
+      activity_label_type?: 'phase';
+      tool_call_ids?: string[];
+      /** Parent phase bounds and telemetry. */
+      activity_start_index?: number;
+      /** Exclusive end of the grouped content; may precede the marker itself. */
+      activity_end_index?: number;
+      activity_count?: number;
+      agent_ids?: string[];
+      /** ok = all tools succeeded, failed = all failed, partial = mixed. */
+      status?: 'ok' | 'partial' | 'failed';
+      pending?: boolean;
+    } & ContentMetadata)
+  | (Agents.AgentUpdate & ContentMetadata)
+  | (Agents.MessageContentImageUrl & ContentMetadata)
+  | (Agents.MessageContentVideoUrl & ContentMetadata)
+  | (Agents.MessageContentInputAudio & ContentMetadata);
 
 export type StreamContentData = TMessageContentParts & {
   /** The index of the current content part */
@@ -462,56 +772,37 @@ export type TContentData = StreamContentData & {
 
 export const actionDelimiter = '_action_';
 export const actionDomainSeparator = '---';
+/** Mirrors `Constants.mcp_delimiter`; duplicated here to avoid a circular import from `config.ts`. */
+const mcpDelimiter = '_mcp_';
+
+/**
+ * Checks whether a tool name is an OpenAPI action tool.
+ *
+ * Action format: `operationId_action_normalizedDomain`
+ * MCP format:    `toolName_mcp_serverName`
+ *
+ * Cross-delimiter collision: an MCP tool like `get_action_mcp_srv` contains
+ * `_action_` as a false positive. Guarded by checking whether `_mcp_` appears
+ * after `_action_`. In the collision case the `_mcp_` suffix always follows
+ * `_action_`; in a valid action tool whose operationId contains `_mcp_`, the
+ * `_mcp_` precedes `_action_`.
+ *
+ * Theoretical limitation: a non-RFC-compliant domain containing literal
+ * underscores that form `_mcp_` (e.g. `api_mcp_internal.com`) would produce
+ * a false negative. RFC 952/1123 prohibit underscores in hostnames, so this
+ * is not expected in practice.
+ */
+export function isActionTool(toolName: string): boolean {
+  const actionIdx = toolName.indexOf(actionDelimiter);
+  if (actionIdx < 0) {
+    return false;
+  }
+  const mcpIdx = toolName.indexOf(mcpDelimiter);
+  return mcpIdx < 0 || mcpIdx < actionIdx;
+}
+
 export const hostImageIdSuffix = '_host_copy';
 export const hostImageNamePrefix = 'host_copy_';
-
-export enum AuthTypeEnum {
-  ServiceHttp = 'service_http',
-  OAuth = 'oauth',
-  None = 'none',
-}
-
-export enum AuthorizationTypeEnum {
-  Bearer = 'bearer',
-  Basic = 'basic',
-  Custom = 'custom',
-}
-
-export enum TokenExchangeMethodEnum {
-  DefaultPost = 'default_post',
-  BasicAuthHeader = 'basic_auth_header',
-}
-
-export type ActionAuth = {
-  authorization_type?: AuthorizationTypeEnum;
-  custom_auth_header?: string;
-  type?: AuthTypeEnum;
-  authorization_content_type?: string;
-  authorization_url?: string;
-  client_url?: string;
-  scope?: string;
-  token_exchange_method?: TokenExchangeMethodEnum;
-};
-
-export type ActionMetadata = {
-  api_key?: string;
-  auth?: ActionAuth;
-  domain?: string;
-  privacy_policy_url?: string;
-  raw_spec?: string;
-  oauth_client_id?: string;
-  oauth_client_secret?: string;
-};
-
-/* Assistant types */
-
-export type Action = {
-  action_id: string;
-  type?: string;
-  settings?: Record<string, unknown>;
-  metadata: ActionMetadata;
-  version: number | string;
-} & ({ assistant_id: string; agent_id?: never } | { assistant_id?: never; agent_id: string });
 
 export type AssistantAvatar = {
   filepath: string;
@@ -528,6 +819,7 @@ export type AssistantDocument = {
   actions?: string[];
   createdAt?: Date;
   updatedAt?: Date;
+  append_current_datetime?: boolean;
 };
 
 /* Agent types */

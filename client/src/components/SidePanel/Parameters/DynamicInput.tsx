@@ -1,18 +1,19 @@
-import { OptionTypes } from 'librechat-data-provider';
+import { OptionTypes, SettingTypes } from 'librechat-data-provider';
+import { Label, Input, HoverCard, HoverCardTrigger } from '@librechat/client';
 import type { DynamicSettingProps } from 'librechat-data-provider';
-import { useLocalize, useDebouncedInput, useParameterEffects } from '~/hooks';
-import { Label, Input, HoverCard, HoverCardTrigger } from '~/components/ui';
-import { cn, defaultTextProps } from '~/utils';
+import { useLocalize, useDebouncedInput, useParameterEffects, TranslationKeys } from '~/hooks';
+import { cn, sanitizeIntegerInput } from '~/utils';
 import { useChatContext } from '~/Providers';
 import OptionHover from './OptionHover';
 import { ESide } from '~/common';
 
 function DynamicInput({
+  type,
+  range,
   label = '',
   settingKey,
   defaultValue,
   description = '',
-  type = 'string',
   columnSpan,
   setOption,
   optionType,
@@ -27,12 +28,9 @@ function DynamicInput({
   const localize = useLocalize();
   const { preset } = useChatContext();
 
-  const [setInputValue, inputValue, setLocalValue] = useDebouncedInput<string | null>({
-    optionKey: optionType !== OptionTypes.Custom ? settingKey : undefined,
-    initialValue:
-      optionType !== OptionTypes.Custom
-        ? (conversation?.[settingKey] as string)
-        : (defaultValue as string),
+  const [setInputValue, inputValue, setLocalValue] = useDebouncedInput<string | number>({
+    optionKey: settingKey,
+    initialValue: optionType !== OptionTypes.Custom ? conversation?.[settingKey] : defaultValue,
     setter: () => ({}),
     setOption,
   });
@@ -47,15 +45,25 @@ function DynamicInput({
   });
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    if (type === 'number') {
-      if (!isNaN(Number(value))) {
-        setInputValue(e);
-      }
-    } else {
-      setInputValue(e);
+    if (type === SettingTypes.Number) {
+      // Integer params: strip thousands separators so "120,000" / "120.000"
+      // become 120000 instead of being truncated to 120 downstream by parseInt.
+      // Keep a leading minus for fields whose range permits negatives (e.g.
+      // Google thinkingBudget, where -1 selects dynamic/auto thinking).
+      const allowNegative = range != null && range.min < 0;
+      const sanitized = sanitizeIntegerInput(e.target.value, allowNegative);
+      // A lone "-" is an in-progress negative; keep it as a string so the field
+      // shows the sign instead of coercing Number("-") to NaN. It resolves to a
+      // number as soon as a digit is typed.
+      setInputValue(sanitized, sanitized !== '-');
+      return;
     }
+    setInputValue(e, type === SettingTypes.String ? false : !isNaN(Number(e.target.value)));
   };
+
+  const placeholderText = placeholderCode
+    ? localize(placeholder as TranslationKeys) || placeholder
+    : placeholder;
 
   return (
     <div
@@ -68,9 +76,9 @@ function DynamicInput({
           <div className="flex w-full justify-between">
             <Label
               htmlFor={`${settingKey}-dynamic-input`}
-              className="text-left text-sm font-medium"
+              className="text-left text-xs font-medium"
             >
-              {labelCode ? localize(label) ?? label : label || settingKey}{' '}
+              {labelCode ? localize(label as TranslationKeys) || label : label || settingKey}{' '}
               {showDefault && (
                 <small className="opacity-40">
                   (
@@ -85,17 +93,22 @@ function DynamicInput({
           <Input
             id={`${settingKey}-dynamic-input`}
             disabled={readonly}
-            value={inputValue ?? ''}
+            inputMode={type === 'number' ? 'numeric' : undefined}
+            value={inputValue ?? defaultValue ?? ''}
             onChange={handleInputChange}
-            placeholder={placeholderCode ? localize(placeholder) ?? placeholder : placeholder}
+            placeholder={placeholderText}
             className={cn(
-              'flex h-10 max-h-10 w-full resize-none border-none bg-surface-secondary px-3 py-2',
+              'flex h-9 max-h-9 w-full resize-none rounded-lg border border-border-light bg-surface-secondary px-3 py-2',
             )}
           />
         </HoverCardTrigger>
         {description && (
           <OptionHover
-            description={descriptionCode ? localize(description) ?? description : description}
+            description={
+              descriptionCode
+                ? localize(description as TranslationKeys) || description
+                : description
+            }
             side={ESide.Left}
           />
         )}

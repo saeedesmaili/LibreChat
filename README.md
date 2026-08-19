@@ -8,6 +8,11 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> ·
+  <a href="README.zh.md">中文</a>
+</p>
+
+<p align="center">
   <a href="https://discord.librechat.ai"> 
     <img
       src="https://img.shields.io/discord/1086345563026489514?label=&logo=discord&style=for-the-badge&logoWidth=20&logoColor=white&labelColor=000000&color=blueviolet">
@@ -27,8 +32,8 @@
 </p>
 
 <p align="center">
-<a href="https://railway.app/template/b5k2mn?referralCode=HI9hWz">
-  <img src="https://railway.app/button.svg" alt="Deploy on Railway" height="30">
+<a href="https://railway.com/deploy/librechat-official?referralCode=HI9hWz&utm_medium=integration&utm_source=readme&utm_campaign=librechat">
+  <img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30">
 </a>
 <a href="https://zeabur.com/templates/0X2ZY8">
   <img src="https://zeabur.com/button.svg" alt="Deploy on Zeabur" height="30"/>
@@ -38,51 +43,105 @@
 </a>
 </p>
 
+<p align="center">
+  <a href="https://www.librechat.ai/docs/translation">
+    <img 
+      src="https://img.shields.io/badge/dynamic/json.svg?style=for-the-badge&color=2096F3&label=locize&query=%24.translatedPercentage&url=https://api.locize.app/badgedata/4cb2598b-ed4d-469c-9b04-2ed531a8cb45&suffix=%+translated" 
+      alt="Translation Progress">
+  </a>
+</p>
+
+## 🚀 What's New in v0.8.8-rc1
+
+- **Agent run control:** Interrupt or steer an Agent mid-run, queue follow-up messages, and reclaim, edit, or escalate pending steers.
+- **Human-in-the-loop Agents:** Agents stream question progress, ask up to four related questions in one form, pause for input or tool approval, and resume.
+- **Unified Agent Builder:** A redesigned Tools marketplace brings together Skills, MCP, Code Interpreter, orchestration, Programmatic Tool Calling, model-spec controls, and per-tool background and intent settings.
+- **Readable Agent activity:** Generated activity-group headers, parent phase summaries, and live tool intent labels make long reasoning and tool runs easier to scan.
+- **Code Interpreter workflows:** Code and shell tools can run in the background, sandbox images return as viewable artifacts, and highly experimental stateful sessions can reuse prewarmed conversation workspaces.
+- **Agent extensibility:** Experimental Agent Plugins can bundle deployment Skills, MCP servers, and opt-in command hooks, while explicit subagents initialize only when selected.
+- **Memory, context, and identity:** Agents can manage memory with optional per-agent isolation, expose support contacts safely, and show a more faithful Context Usage gauge.
+- **Sharing and files:** Shared conversations show a badge and update at a stable URL, while signed-in viewers can continue them as personal copies.
+- **Artifact workflows:** Open previews fullscreen, work with PowerPoint `.potx` templates across upload, search, and code execution, upload shell scripts across common MIME variants, export Mermaid diagrams as SVG or PNG, and download original Office files from the artifact panel.
+- **Models and reasoning:** Added GPT-5.6 with Responses API reasoning controls, Claude Opus 5 and Sonnet 5, Gemini 3.7 and 3.6 Flash, and Gemini 3.5 Flash-Lite.
+- **Langfuse observability:** Configure encrypted Langfuse connections in-app, let authorized admins open sampled sessions directly, optionally fan out traces by tenant, and suppress central export per run.
+- **Administration and security:** Delegate config sections, encrypt registered secrets, enforce SSRF checks for speech, OCR, and web tools, and generate unique temporary credentials when secrets are blank.
+- **Messages and navigation:** Right-aligned user turns, unified multi-part editing, full-message copy, a dock-style message rail, virtualized search, smooth streaming, and faster Agent startup.
+- **Streaming and tool reliability:** Adaptive provider smoothing, Redis delta batching, dynamic MCP tool refresh, parsed MCP response media types, runtime OAuth recovery, and Agent stream circuit breakers improve long-running workflows.
+- **Deployment and reliability:** Added configurable HTTP timeouts, Amazon DocumentDB 5.0+ support, low-noise Redis and browser observability, and a rolling-upgrade-safe generation protocol.
+
+Read the [full v0.8.8-rc1 changelog](https://www.librechat.ai/changelog/v0.8.8-rc1).
+
 # ✨ Features
 
 - 🖥️ **UI & Experience** inspired by ChatGPT with enhanced design and features
 
 - 🤖 **AI Model Selection**:  
-  - Anthropic (Claude), AWS Bedrock, OpenAI, Azure OpenAI, Google, Vertex AI, OpenAI Assistants API (incl. Azure)
+  - Anthropic (Claude), AWS Bedrock, OpenAI, Azure OpenAI, Google, Vertex AI, OpenAI Responses API (incl. Azure)
   - [Custom Endpoints](https://www.librechat.ai/docs/quick_start/custom_endpoints): Use any OpenAI-compatible API with LibreChat, no proxy required
   - Compatible with [Local & Remote AI Providers](https://www.librechat.ai/docs/configuration/librechat_yaml/ai_endpoints):
     - Ollama, groq, Cohere, Mistral AI, Apple MLX, koboldcpp, together.ai,
-    - OpenRouter, Perplexity, ShuttleAI, Deepseek, Qwen, and more
+    - OpenRouter, Helicone, Perplexity, ShuttleAI, Deepseek, Qwen, and more
 
 - 🔧 **[Code Interpreter API](https://www.librechat.ai/docs/features/code_interpreter)**: 
   - Secure, Sandboxed Execution in Python, Node.js (JS/TS), Go, C/C++, Java, PHP, Rust, and Fortran
   - Seamless File Handling: Upload, process, and download files directly
   - No Privacy Concerns: Fully isolated and secure execution
+  - Open-Source & Self-Hostable: powered by [ClickHouse/code-interpreter](https://github.com/ClickHouse/code-interpreter)
 
 - 🔦 **Agents & Tools Integration**:  
   - **[LibreChat Agents](https://www.librechat.ai/docs/features/agents)**:
-    - No-Code Custom Assistants: Build specialized, AI-driven helpers without coding  
-    - Flexible & Extensible: Attach tools like DALL-E-3, file search, code execution, and more  
-    - Compatible with Custom Endpoints, OpenAI, Azure, Anthropic, AWS Bedrock, and more
-  - Use LibreChat Agents and OpenAI Assistants with Files, Code Interpreter, Tools, and API Actions
+    - No-Code Custom Assistants: Build specialized, AI-driven helpers
+    - Agent Marketplace: Discover and deploy community-built agents
+    - Collaborative Sharing: Share agents with specific users and groups
+    - Flexible & Extensible: Use MCP Servers, tools, file search, code execution, and more
+    - [Skills](https://www.librechat.ai/docs/features/skills): Create reusable `SKILL.md` instruction bundles for manual, automatic, or always-on agent workflows
+    - [Agent Plugins](https://www.librechat.ai/docs/features/agent_plugins): Experimentally bundle deployment Skills and MCP servers into startup-loaded packages
+    - [Subagents](https://www.librechat.ai/docs/features/subagents): Delegate focused work to isolated child agent runs with their own context windows
+    - Compatible with Custom Endpoints, OpenAI, Azure, Anthropic, AWS Bedrock, Google, Vertex AI, Responses API, and more
+    - [Model Context Protocol (MCP) Support](https://modelcontextprotocol.io/clients#librechat) for Tools
+
+- 🔍 **Web Search**:  
+  - Search the internet and retrieve relevant information to enhance your AI context
+  - Combines search providers, content scrapers, and result rerankers for optimal results
+  - **Customizable Jina Reranking**: Configure custom Jina API URLs for reranking services
+  - **[Learn More →](https://www.librechat.ai/docs/features/web_search)**
 
 - 🪄 **Generative UI with Code Artifacts**:  
-  - [Code Artifacts](https://youtu.be/GfTj7O4gmd0?si=WJbdnemZpJzBrJo3) allow creation of React, HTML, and Mermaid diagrams directly in chat
+  - [Code Artifacts](https://youtu.be/GfTj7O4gmd0?si=WJbdnemZpJzBrJo3) create React, HTML, and Mermaid content directly in chat
+  - Open previews fullscreen and export Mermaid diagrams as SVG or PNG
+
+- 🎨 **Image Generation & Editing**
+  - Text-to-image and image-to-image with [GPT-Image-1](https://www.librechat.ai/docs/features/image_gen#1--openai-image-tools-recommended)
+  - Text-to-image with [DALL-E (3/2)](https://www.librechat.ai/docs/features/image_gen#2--dalle-legacy), [Stable Diffusion](https://www.librechat.ai/docs/features/image_gen#3--stable-diffusion-local), [Flux](https://www.librechat.ai/docs/features/image_gen#4--flux), or any [MCP server](https://www.librechat.ai/docs/features/image_gen#5--model-context-protocol-mcp)
+  - Produce stunning visuals from prompts or refine existing images with a single instruction
 
 - 💾 **Presets & Context Management**:  
   - Create, Save, & Share Custom Presets  
   - Switch between AI Endpoints and Presets mid-chat
   - Edit, Resubmit, and Continue Messages with Conversation branching  
+  - Create and share prompts with specific users and groups
   - [Fork Messages & Conversations](https://www.librechat.ai/docs/features/fork) for Advanced Context control
 
 - 💬 **Multimodal & File Interactions**:  
-  - Upload and analyze images with Claude 3, GPT-4o, o1, Llama-Vision, and Gemini 📸  
+  - Upload and analyze images with Claude 3, GPT-4.5, GPT-4o, o1, Llama-Vision, and Gemini 📸  
   - Chat with Files using Custom Endpoints, OpenAI, Azure, Anthropic, AWS Bedrock, & Google 🗃️
 
-- 🌎 **Multilingual UI**:  
-  - English, 中文, Deutsch, Español, Français, Italiano, Polski, Português Brasileiro
-  - Русский, 日本語, Svenska, 한국어, Tiếng Việt, 繁體中文, العربية, Türkçe, Nederlands, עברית
+- 🌎 **Multilingual UI**:
+  - English, 中文 (简体), 中文 (繁體), العربية, Deutsch, Español, Français, Italiano
+  - Polski, Português (PT), Português (BR), Русский, 日本語, Svenska, 한국어, Tiếng Việt
+  - Türkçe, Nederlands, עברית, Català, Čeština, Dansk, Eesti, فارسی
+  - Suomi, Magyar, Հայերեն, Bahasa Indonesia, ქართული, Latviešu, ไทย, ئۇيغۇرچە
+
+- 🧠 **Reasoning UI**:  
+  - Dynamic Reasoning UI for Chain-of-Thought/Reasoning AI models like DeepSeek-R1
 
 - 🎨 **Customizable Interface**:  
   - Customizable Dropdown & Interface that adapts to both power users and newcomers
 
-- 📧 **Secure Access**:  
-  - Verify your email to ensure secure access
+- 🌊 **[Resumable Streams](https://www.librechat.ai/docs/features/resumable_streams)**:  
+  - Never lose a response: AI responses automatically reconnect and resume if your connection drops
+  - Multi-Tab & Multi-Device Sync: Open the same chat in multiple tabs or pick up on another device
+  - Production-Ready: Works from single-server setups to horizontally scaled deployments with Redis
 
 - 🗣️ **Speech & Audio**:  
   - Chat hands-free with Speech-to-Text and Text-to-Speech  
@@ -96,12 +155,18 @@
 - 🔍 **Search & Discovery**:  
   - Search all messages/conversations
 
-- 👥 **Multi-User & Secure**:
-  - Multi-User, Secure Authentication with OAuth2 & Email Login Support
+- 👥 **Multi-User & Secure Access**:
+  - Multi-User, Secure Authentication with OAuth2, LDAP, & Email Login Support
   - Built-in Moderation, and Token spend tools
+
+- 🎛️ **[Admin Panel](https://www.librechat.ai/docs/features/admin_panel)**:
+  - Browser-based UI to manage users, groups, roles, and configuration overrides
+  - Edit settings and per-role/group permissions live, without redeploying
+  - Bundled with the Docker Compose stacks for one-command setup
 
 - ⚙️ **Configuration & Deployment**:  
   - Configure Proxy, Reverse Proxy, Docker, & many Deployment options  
+  - Use [S3 with CloudFront](https://www.librechat.ai/docs/configuration/cdn/cloudfront) for stable media links, edge delivery, signed cookies, and secured downloads
   - Use completely local or deploy on the cloud
 
 - 📖 **Open-Source & Community**:  
@@ -112,12 +177,11 @@
 
 ## 🪶 All-In-One AI Conversations with LibreChat
 
-LibreChat brings together the future of assistant AIs with the revolutionary technology of OpenAI's ChatGPT. Celebrating the original styling, LibreChat gives you the ability to integrate multiple AI models. It also integrates and enhances original client features such as conversation and message search, prompt templates and plugins.
+LibreChat is a self-hosted AI chat platform that unifies all major AI providers in a single, privacy-focused interface.
 
-With LibreChat, you no longer need to opt for ChatGPT Plus and can instead use free or pay-per-call APIs. We welcome contributions, cloning, and forking to enhance the capabilities of this advanced chatbot platform.
+Beyond chat, LibreChat provides AI Agents, Model Context Protocol (MCP) support, Artifacts, Code Interpreter, custom actions, conversation search, and enterprise-ready multi-user authentication.
 
-[![Watch the video](https://raw.githubusercontent.com/LibreChat-AI/librechat.ai/main/public/images/changelog/v0.7.5.png)](https://www.youtube.com/watch?v=IDukQ7a2f3U)
-Click on the thumbnail to open the video☝️
+Open source, actively developed, and built for anyone who values control over their AI infrastructure.
 
 ---
 
@@ -129,8 +193,8 @@ Click on the thumbnail to open the video☝️
 
 **Other:**
   - **Website:** [librechat.ai](https://librechat.ai)
-  - **Documentation:** [docs.librechat.ai](https://docs.librechat.ai)
-  - **Blog:** [blog.librechat.ai](https://blog.librechat.ai)
+  - **Documentation:** [librechat.ai/docs](https://librechat.ai/docs)
+  - **Blog:** [librechat.ai/blog](https://librechat.ai/blog)
 
 ---
 
@@ -147,10 +211,15 @@ Keep up with the latest updates by visiting the releases page and notes:
 ## ⭐ Star History
 
 <p align="center">
-  <a href="https://star-history.com/#danny-avila/LibreChat&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=danny-avila/LibreChat&type=Date&theme=dark" onerror="this.src='https://api.star-history.com/svg?repos=danny-avila/LibreChat&type=Date'" />
+  <a href="https://www.star-history.com/?type=date&repos=danny-avila%2FLibreChat">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=danny-avila/LibreChat&type=date&theme=dark&legend=top-left&sealed_token=CXsk3L39t1nlibOv3pQloYwrz8R_yXxCAe1X3DG8sEnmu3PZvzSRZGf7JvisknF83yXqMwR6IcuKLolIQBulChAOseTYP1TDglfT6clOHXzspF-DJhmmsnGasrGpLfCeOEU56Bx761CJp9xDxza5rbyXW3F1GqWNtDf9pMroBq86vS70ilRWu16VyucF" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=danny-avila/LibreChat&type=date&legend=top-left&sealed_token=CXsk3L39t1nlibOv3pQloYwrz8R_yXxCAe1X3DG8sEnmu3PZvzSRZGf7JvisknF83yXqMwR6IcuKLolIQBulChAOseTYP1TDglfT6clOHXzspF-DJhmmsnGasrGpLfCeOEU56Bx761CJp9xDxza5rbyXW3F1GqWNtDf9pMroBq86vS70ilRWu16VyucF" />
+      <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=danny-avila/LibreChat&type=date&legend=top-left&sealed_token=CXsk3L39t1nlibOv3pQloYwrz8R_yXxCAe1X3DG8sEnmu3PZvzSRZGf7JvisknF83yXqMwR6IcuKLolIQBulChAOseTYP1TDglfT6clOHXzspF-DJhmmsnGasrGpLfCeOEU56Bx761CJp9xDxza5rbyXW3F1GqWNtDf9pMroBq86vS70ilRWu16VyucF" />
+    </picture>
   </a>
 </p>
+
 <p align="center">
   <a href="https://trendshift.io/repositories/4685" target="_blank" style="padding: 10px;">
     <img src="https://trendshift.io/api/badge/repositories/4685" alt="danny-avila%2FLibreChat | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
@@ -168,6 +237,8 @@ Contributions, suggestions, bug reports and fixes are welcome!
 
 For new features, components, or extensions, please open an issue and discuss before sending a PR.
 
+If you'd like to help translate LibreChat into your language, we'd love your contribution! Improving our translations not only makes LibreChat more accessible to users around the world but also enhances the overall user experience. Please check out our [Translation Guide](https://www.librechat.ai/docs/translation).
+
 ---
 
 ## 💖 This project exists in its current state thanks to all the people who contribute
@@ -175,3 +246,15 @@ For new features, components, or extensions, please open an issue and discuss be
 <a href="https://github.com/danny-avila/LibreChat/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=danny-avila/LibreChat" />
 </a>
+
+---
+
+## 🎉 Special Thanks
+
+We thank [Locize](https://locize.com) for their translation management tools that support multiple languages in LibreChat.
+
+<p align="center">
+  <a href="https://locize.com" target="_blank" rel="noopener noreferrer">
+    <img src="https://github.com/user-attachments/assets/d6b70894-6064-475e-bb65-92a9e23e0077" alt="Locize Logo" height="50">
+  </a>
+</p>

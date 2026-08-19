@@ -1,11 +1,25 @@
-import debounce from 'lodash/debounce';
 import { useState, useEffect } from 'react';
+import debounce from 'lodash/debounce';
+import { Maximize2 } from 'lucide-react';
 import { useFormContext } from 'react-hook-form';
 import {
   validateAndParseOpenAPISpec,
   openapiToFunction,
   AuthTypeEnum,
 } from 'librechat-data-provider';
+import {
+  Label,
+  Button,
+  Spinner,
+  Textarea,
+  OGDialog,
+  TooltipAnchor,
+  OGDialogTitle,
+  OGDialogHeader,
+  OGDialogContent,
+  OGDialogDescription,
+  useToastContext,
+} from '@librechat/client';
 import type {
   Action,
   FunctionTool,
@@ -14,12 +28,11 @@ import type {
 } from 'librechat-data-provider';
 import type { ActionAuthForm } from '~/common';
 import type { Spec } from './ActionsTable';
-import { ActionsTable, columns } from './ActionsTable';
+import { ActionsTable, ActionsTableSkeleton, columns } from './ActionsTable';
+import ActionCallback from '~/components/SidePanel/Builder/ActionCallback';
 import { useUpdateAgentAction } from '~/data-provider';
-import { cn, removeFocusOutlines } from '~/utils';
-import { useToastContext } from '~/Providers';
-import useLocalize from '~/hooks/useLocalize';
-import { Spinner } from '~/components/svg';
+import { useLocalize } from '~/hooks';
+import { logger } from '~/utils';
 
 const debouncedValidation = debounce(
   (input: string, callback: (result: ValidationResult) => void) => {
@@ -29,19 +42,25 @@ const debouncedValidation = debounce(
   800,
 );
 
+/** Placeholder rows shaped like the "Available actions" table (Name / Method / Path). */
 export default function ActionsInput({
   action,
   agent_id,
   setAction,
+  onCreated,
+  footerStart,
 }: {
   action?: Action;
   agent_id?: string;
   setAction: React.Dispatch<React.SetStateAction<Action | undefined>>;
+  onCreated?: () => void;
+  footerStart?: React.ReactNode;
 }) {
   const handleResult = (result: ValidationResult) => {
     if (!result.status) {
       setData(null);
       setFunctions(null);
+      setIsValidating(false);
     }
     setValidationResult(result);
   };
@@ -51,17 +70,21 @@ export default function ActionsInput({
   const { handleSubmit, reset } = useFormContext<ActionAuthForm>();
   const [validationResult, setValidationResult] = useState<null | ValidationResult>(null);
   const [inputValue, setInputValue] = useState('');
+  const [isValidating, setIsValidating] = useState(false);
+  const [isSchemaDialogOpen, setIsSchemaDialogOpen] = useState(false);
 
   const [data, setData] = useState<Spec[] | null>(null);
   const [functions, setFunctions] = useState<FunctionTool[] | null>(null);
 
   useEffect(() => {
-    if (!action?.metadata?.raw_spec) {
+    const rawSpec = action?.metadata.raw_spec ?? '';
+    if (!rawSpec) {
       return;
     }
-    setInputValue(action.metadata.raw_spec);
-    debouncedValidation(action.metadata.raw_spec, handleResult);
-  }, [action?.metadata?.raw_spec]);
+    setInputValue(rawSpec);
+    setIsValidating(true);
+    handleResult(validateAndParseOpenAPISpec(rawSpec));
+  }, [action?.metadata.raw_spec]);
 
   useEffect(() => {
     if (!validationResult || !validationResult.status || !validationResult.spec) {
@@ -81,28 +104,34 @@ export default function ActionsInput({
     setData(specs);
     setValidationResult(null);
     setFunctions(functionSignatures.map((f) => f.toObjectTool()));
+    setIsValidating(false);
   }, [validationResult]);
 
   const updateAgentAction = useUpdateAgentAction({
     onSuccess(data) {
+      const wasCreate = !action?.action_id;
       showToast({
         message: localize('com_assistants_update_actions_success'),
         status: 'success',
       });
       reset();
       setAction(data[1]);
+      if (wasCreate) {
+        onCreated?.();
+      }
     },
     onError(error) {
       showToast({
-        message: (error as Error)?.message ?? localize('com_assistants_update_actions_error'),
+        message: (error as Error).message || localize('com_assistants_update_actions_error'),
         status: 'error',
       });
     },
   });
 
   const saveAction = handleSubmit((authFormData) => {
-    console.log('authFormData', authFormData);
-    if (!agent_id) {
+    logger.log('actions', 'saving action', authFormData);
+    const currentAgentId = agent_id ?? '';
+    if (!currentAgentId) {
       // alert user?
       return;
     }
@@ -119,12 +148,12 @@ export default function ActionsInput({
     const action_id = action?.action_id;
     metadata.raw_spec = inputValue;
     const parsedUrl = new URL(data[0].domain);
-    const domain = parsedUrl.hostname;
-    if (!domain) {
+    if (!parsedUrl.hostname) {
       // alert user?
       return;
     }
-    metadata.domain = domain;
+    // Send protocol + hostname for proper SSRF validation (e.g., "http://192.168.1.1")
+    metadata.domain = `${parsedUrl.protocol}//${parsedUrl.hostname}`;
 
     const { type, saved_auth_fields } = authFormData;
 
@@ -171,7 +200,7 @@ export default function ActionsInput({
       action_id,
       metadata,
       functions,
-      agent_id,
+      agent_id: currentAgentId,
     });
   });
 
@@ -181,105 +210,127 @@ export default function ActionsInput({
     if (!newValue) {
       setData(null);
       setFunctions(null);
+      setIsValidating(false);
       return setValidationResult(null);
     }
+    setIsValidating(true);
     debouncedValidation(newValue, handleResult);
   };
 
+  const getButtonContent = () => {
+    if (updateAgentAction.isLoading) {
+      return <Spinner className="icon-md" />;
+    }
+
+    if (action?.action_id != null && action.action_id) {
+      return localize('com_ui_update');
+    }
+
+    return localize('com_ui_create');
+  };
+
+  const validationError =
+    validationResult && validationResult.message !== 'OpenAPI spec is valid.'
+      ? validationResult.message
+      : null;
+  const showSkeleton = isValidating && !data;
+
   return (
     <>
-      <div className="">
-        <div className="mb-1 flex flex-wrap items-center justify-between gap-4">
-          <label className="text-token-text-primary whitespace-nowrap font-medium">Schema</label>
-          <div className="flex items-center gap-2">
-            {/* <button className="btn btn-neutral border-token-border-light relative h-8 min-w-[100px] rounded-lg font-medium">
-              <div className="flex w-full items-center justify-center text-xs">Import from URL</div>
-            </button> */}
-            <select
-              onChange={(e) => console.log(e.target.value)}
-              className="border-token-border-medium h-8 min-w-[100px] rounded-lg border bg-transparent px-2 py-0 text-sm"
-            >
-              <option value="label">{localize('com_ui_examples')}</option>
-              {/* TODO: make these appear and function correctly */}
-              <option value="0">Weather (JSON)</option>
-              <option value="1">Pet Store (YAML)</option>
-              <option value="2">Blank Template</option>
-            </select>
+      <div className="flex shrink-0 flex-col">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <label
+            htmlFor="schemaInput"
+            className="whitespace-nowrap text-sm font-medium text-text-primary"
+          >
+            {localize('com_ui_schema')}
+          </label>
+          <TooltipAnchor
+            side="top"
+            description={localize('com_ui_expand_editor')}
+            render={
+              <button
+                type="button"
+                onClick={() => setIsSchemaDialogOpen(true)}
+                aria-label={localize('com_ui_expand_editor')}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-surface-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-primary"
+              >
+                <Maximize2 className="h-4 w-4" strokeWidth={1.75} aria-hidden={true} />
+              </button>
+            }
+          />
+        </div>
+        <Textarea
+          id="schemaInput"
+          value={inputValue}
+          onChange={handleInputChange}
+          spellCheck="false"
+          placeholder={localize('com_ui_enter_openapi_schema')}
+          className="block min-h-[12rem] w-full resize-y rounded-lg border border-border-light bg-transparent p-3 font-mono text-xs leading-relaxed transition-colors focus-visible:border-border-heavy focus-visible:ring-0"
+        />
+        {validationError && (
+          <div className="mt-1.5 text-xs text-red-500">
+            {validationError.split('\n').map((line: string, i: number) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        )}
+      </div>
+      {(data || showSkeleton) && (
+        <div className="mt-4 flex min-h-0 flex-1 flex-col">
+          <Label className="mb-1 shrink-0 font-medium">
+            {localize('com_assistants_available_actions')}
+          </Label>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {data ? <ActionsTable columns={columns} data={data} /> : <ActionsTableSkeleton />}
           </div>
         </div>
-        <div className="border-token-border-light mb-4 overflow-hidden rounded-lg border">
-          <div className="relative">
-            <textarea
+      )}
+      <div className="mt-4 shrink-0">
+        <ActionCallback action_id={action?.action_id} />
+      </div>
+      <div className="flex shrink-0 items-center justify-between gap-2 pt-4">
+        <div className="flex items-center">{footerStart}</div>
+        <Button
+          type="button"
+          variant="submit"
+          onClick={saveAction}
+          disabled={!functions || !functions.length}
+          className="min-w-[100px]"
+        >
+          {getButtonContent()}
+        </Button>
+      </div>
+
+      <OGDialog open={isSchemaDialogOpen} onOpenChange={setIsSchemaDialogOpen}>
+        <OGDialogContent className="flex h-[85vh] max-h-[85vh] w-11/12 max-w-5xl flex-col gap-3 p-5">
+          <OGDialogHeader className="space-y-0 pr-10">
+            <OGDialogTitle className="text-left text-sm font-medium text-text-primary">
+              {localize('com_ui_schema')}
+            </OGDialogTitle>
+            <OGDialogDescription className="sr-only">
+              {localize('com_ui_enter_openapi_schema')}
+            </OGDialogDescription>
+          </OGDialogHeader>
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border-medium bg-surface-secondary focus-within:border-border-heavy">
+            <Textarea
               value={inputValue}
               onChange={handleInputChange}
               spellCheck="false"
-              placeholder="Enter your OpenAPI schema here"
-              className={cn(
-                'text-token-text-primary block h-96 w-full border-none bg-transparent p-2 font-mono text-xs',
-                removeFocusOutlines,
-              )}
+              placeholder={localize('com_ui_enter_openapi_schema')}
+              aria-label={localize('com_ui_schema')}
+              className="min-h-0 flex-1 resize-none border-0 bg-transparent p-4 font-mono text-[13px] leading-relaxed focus-visible:ring-0"
             />
-            {/* TODO: format input button */}
           </div>
-          {validationResult && validationResult.message !== 'OpenAPI spec is valid.' && (
-            <div className="border-token-border-light border-t p-2 text-red-500">
-              {validationResult.message.split('\n').map((line: string, i: number) => (
+          {validationError && (
+            <div className="max-h-24 shrink-0 overflow-y-auto text-xs text-red-500">
+              {validationError.split('\n').map((line: string, i: number) => (
                 <div key={i}>{line}</div>
               ))}
             </div>
           )}
-        </div>
-      </div>
-      {!!data && (
-        <div>
-          <div className="mb-1.5 flex items-center">
-            <label className="text-token-text-primary block font-medium">
-              {localize('com_assistants_available_actions')}
-            </label>
-          </div>
-          <ActionsTable columns={columns} data={data} />
-        </div>
-      )}
-      <div className="mt-4">
-        <div className="mb-1.5 flex items-center">
-          <span className="" data-state="closed">
-            <label className="text-token-text-primary block font-medium">
-              {localize('com_ui_privacy_policy')}
-            </label>
-          </span>
-        </div>
-        <div className="rounded-md border border-gray-300 px-3 py-2 shadow-none focus-within:border-gray-800 focus-within:ring-1 focus-within:ring-gray-800 dark:border-gray-700 dark:bg-gray-700 dark:focus-within:border-gray-500 dark:focus-within:ring-gray-500">
-          <label
-            htmlFor="privacyPolicyUrl"
-            className="block text-xs font-medium text-gray-900 dark:text-gray-100"
-          />
-          <div className="relative">
-            <input
-              name="privacyPolicyUrl"
-              id="privacyPolicyUrl"
-              className="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 shadow-none outline-none focus-within:shadow-none focus-within:outline-none focus-within:ring-0 focus:border-none focus:ring-0 dark:bg-gray-700 dark:text-gray-100 sm:text-sm"
-              placeholder="https://api.example-weather-app.com/privacy"
-              // value=""
-            />
-          </div>
-        </div>
-      </div>
-      <div className="flex items-center justify-end">
-        <button
-          disabled={!functions || !functions.length}
-          onClick={saveAction}
-          className="focus:shadow-outline mt-1 flex min-w-[100px] items-center justify-center rounded bg-green-500 px-4 py-2 font-semibold text-white hover:bg-green-400 focus:border-green-500 focus:outline-none focus:ring-0 disabled:bg-green-400"
-          type="button"
-        >
-          {updateAgentAction.isLoading ? (
-            <Spinner className="icon-md" />
-          ) : action?.action_id ? (
-            localize('com_ui_update')
-          ) : (
-            localize('com_ui_create')
-          )}
-        </button>
-      </div>
+        </OGDialogContent>
+      </OGDialog>
     </>
   );
 }

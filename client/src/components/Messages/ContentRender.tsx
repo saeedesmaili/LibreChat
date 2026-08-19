@@ -1,176 +1,220 @@
-import { useRecoilValue } from 'recoil';
 import { useCallback, useMemo, memo } from 'react';
+import { useRecoilValue } from 'recoil';
 import type { TMessage, TMessageContentParts } from 'librechat-data-provider';
-import type { TMessageProps } from '~/common';
+import type { TMessageProps, TMessageIcon, TMessageChatContext } from '~/common';
+import {
+  areMessageFieldsEqual,
+  cn,
+  getHeaderPrefixForScreenReader,
+  getMessageAriaLabel,
+} from '~/utils';
+import { revealOnRowHoverClasses, messageFooterClasses } from '~/components/Chat/Messages/styles';
+import { useAttachments, useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
+import AuthorHeader from '~/components/Chat/Messages/Content/Parts/AuthorHeader';
+import { getHeaderModelName } from '~/components/Chat/Messages/ui/HeaderLabel';
 import ContentParts from '~/components/Chat/Messages/Content/ContentParts';
-import PlaceholderRow from '~/components/Chat/Messages/ui/PlaceholderRow';
 import SiblingSwitch from '~/components/Chat/Messages/SiblingSwitch';
 import HoverButtons from '~/components/Chat/Messages/HoverButtons';
-import Icon from '~/components/Chat/Messages/MessageIcon';
+import MessageRow from '~/components/Chat/Messages/ui/MessageRow';
+import MessageIcon from '~/components/Chat/Messages/MessageIcon';
 import SubRow from '~/components/Chat/Messages/SubRow';
-import { useMessageActions } from '~/hooks';
-import { cn, logger } from '~/utils';
 import store from '~/store';
 
 type ContentRenderProps = {
   message?: TMessage;
-  isCard?: boolean;
-  isMultiMessage?: boolean;
-  isSubmittingFamily?: boolean;
+  /**
+   * Effective isSubmitting: false for non-latest messages, real value for latest.
+   * Computed by the wrapper (MessageContent.tsx) so this memo'd component only re-renders
+   * when the value actually matters.
+   */
+  isSubmitting?: boolean;
+  /** Stable context object from wrapper — avoids ChatContext subscription inside memo */
+  chatContext: TMessageChatContext;
 } & Pick<
   TMessageProps,
   'currentEditId' | 'setCurrentEditId' | 'siblingIdx' | 'setSiblingIdx' | 'siblingCount'
 >;
 
-const ContentRender = memo(
-  ({
-    isCard,
-    siblingIdx,
-    siblingCount,
+/**
+ * Custom comparator for React.memo: compares `message` by key fields instead of reference
+ * because `buildTree` creates new message objects on every streaming update for ALL messages.
+ */
+function areContentRenderPropsEqual(prev: ContentRenderProps, next: ContentRenderProps): boolean {
+  if (prev.isSubmitting !== next.isSubmitting) {
+    return false;
+  }
+  if (prev.chatContext !== next.chatContext) {
+    return false;
+  }
+  if (prev.siblingIdx !== next.siblingIdx) {
+    return false;
+  }
+  if (prev.siblingCount !== next.siblingCount) {
+    return false;
+  }
+  if (prev.currentEditId !== next.currentEditId) {
+    return false;
+  }
+  if (prev.setSiblingIdx !== next.setSiblingIdx) {
+    return false;
+  }
+  if (prev.setCurrentEditId !== next.setCurrentEditId) {
+    return false;
+  }
+
+  return areMessageFieldsEqual(prev.message, next.message);
+}
+
+const ContentRender = memo(function ContentRender({
+  message: msg,
+  siblingIdx,
+  siblingCount,
+  setSiblingIdx,
+  currentEditId,
+  setCurrentEditId,
+  isSubmitting = false,
+  chatContext,
+}: ContentRenderProps) {
+  const localize = useLocalize();
+  const { attachments, searchResults } = useAttachments({
+    messageId: msg?.messageId,
+    attachments: msg?.attachments,
+  });
+  const {
+    edit,
+    index,
+    agent,
+    assistant,
+    enterEdit,
+    conversation,
+    messageLabel,
+    handleContinue,
+    handleFeedback,
+    latestMessageId,
+    copyToClipboard,
+    getCanCopy,
+    regenerateMessage,
+    latestMessageDepth,
+  } = useMessageActions({
     message: msg,
-    setSiblingIdx,
+    searchResults,
     currentEditId,
-    isMultiMessage,
     setCurrentEditId,
-    isSubmittingFamily,
-  }: ContentRenderProps) => {
-    const {
-      // ask,
-      edit,
-      index,
-      agent,
-      assistant,
-      enterEdit,
-      conversation,
+    chatContext,
+  });
+  const maximizeChatSpace = useRecoilValue(store.maximizeChatSpace);
+
+  const handleRegenerateMessage = useCallback(() => regenerateMessage(), [regenerateMessage]);
+  const isLast = useMemo(
+    () => !(msg?.children?.length ?? 0) && (msg?.depth === latestMessageDepth || msg?.depth === -1),
+    [msg?.children, msg?.depth, latestMessageDepth],
+  );
+  const isLatestMessage = msg?.messageId === latestMessageId;
+
+  const iconData: TMessageIcon = useMemo(
+    () => ({
+      endpoint: msg?.endpoint ?? conversation?.endpoint,
+      model: msg?.model ?? conversation?.model,
+      iconURL: msg?.iconURL,
+      modelLabel: messageLabel,
+      isCreatedByUser: msg?.isCreatedByUser,
+    }),
+    [
       messageLabel,
-      isSubmitting,
-      latestMessage,
-      handleContinue,
-      copyToClipboard,
-      setLatestMessage,
-      regenerateMessage,
-    } = useMessageActions({
-      message: msg,
-      currentEditId,
-      isMultiMessage,
-      setCurrentEditId,
-    });
+      conversation?.endpoint,
+      conversation?.model,
+      msg?.model,
+      msg?.iconURL,
+      msg?.endpoint,
+      msg?.isCreatedByUser,
+    ],
+  );
 
-    const fontSize = useRecoilValue(store.fontSize);
-    const handleRegenerateMessage = useCallback(() => regenerateMessage(), [regenerateMessage]);
-    // const { isCreatedByUser, error, unfinished } = msg ?? {};
-    const isLast = useMemo(
-      () =>
-        !(msg?.children?.length ?? 0) && (msg?.depth === latestMessage?.depth || msg?.depth === -1),
-      [msg?.children, msg?.depth, latestMessage?.depth],
-    );
+  const authorHeader = useMemo(
+    () =>
+      msg?.isCreatedByUser === true ? undefined : (
+        <AuthorHeader
+          icon={<MessageIcon iconData={iconData} assistant={assistant} agent={agent} />}
+          label={messageLabel ?? ''}
+        />
+      ),
+    [msg?.isCreatedByUser, iconData, assistant, agent, messageLabel],
+  );
 
-    if (!msg) {
-      return null;
-    }
+  const { hasParallelContent } = useContentMetadata(msg);
 
-    const isLatestMessage = msg.messageId === latestMessage?.messageId;
-    const showCardRender = isLast && !(isSubmittingFamily === true) && isCard === true;
-    const isLatestCard = isCard === true && !(isSubmittingFamily === true) && isLatestMessage;
-    const clickHandler =
-      showCardRender && !isLatestMessage
-        ? () => {
-          logger.log(`Message Card click: Setting ${msg.messageId} as latest message`);
-          logger.dir(msg);
-          setLatestMessage(msg);
-        }
-        : undefined;
+  if (!msg) {
+    return null;
+  }
 
-    return (
-      <div
-        aria-label={`message-${msg.depth}-${msg.messageId}`}
-        className={cn(
-          'final-completion group mx-auto flex flex-1 gap-3',
-          isCard === true
-            ? 'relative w-full gap-1 rounded-lg border border-border-medium bg-surface-primary-alt p-2 md:w-1/2 md:gap-3 md:p-4'
-            : 'md:max-w-3xl md:px-5 lg:max-w-[40rem] lg:px-1 xl:max-w-[48rem] xl:px-5',
-          isLatestCard === true ? 'bg-surface-secondary' : '',
-          showCardRender ? 'cursor-pointer transition-colors duration-300' : '',
-          'focus:outline-none focus:ring-2 focus:ring-border-xheavy',
-        )}
-        onClick={clickHandler}
-        onKeyDown={(e) => {
-          if ((e.key === 'Enter' || e.key === ' ') && clickHandler) {
-            clickHandler();
-          }
-        }}
-        role={showCardRender ? 'button' : undefined}
-        tabIndex={showCardRender ? 0 : undefined}
-      >
-        {isLatestCard === true && (
-          <div className="absolute right-0 top-0 m-2 h-3 w-3 rounded-full bg-text-primary" />
-        )}
-        <div className="relative flex flex-shrink-0 flex-col items-end">
-          <div>
-            <div className="pt-0.5">
-              <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-full">
-                <Icon
-                  message={msg}
-                  conversation={conversation}
-                  assistant={assistant}
-                  agent={agent}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-        <div
-          className={cn(
-            'relative flex w-11/12 flex-col',
-            msg.isCreatedByUser === true ? '' : 'agent-turn',
-          )}
-        >
-          <h2 className={cn('select-none font-semibold', fontSize)}>{messageLabel}</h2>
-          <div className="flex-col gap-1 md:gap-3">
-            <div className="flex max-w-full flex-grow flex-col gap-0">
-              <ContentParts
-                edit={edit}
-                isLast={isLast}
-                enterEdit={enterEdit}
-                siblingIdx={siblingIdx}
-                messageId={msg.messageId}
-                isSubmitting={isSubmitting}
-                setSiblingIdx={setSiblingIdx}
-                attachments={msg.attachments}
-                isCreatedByUser={msg.isCreatedByUser}
-                conversationId={conversation?.conversationId}
-                content={msg.content as Array<TMessageContentParts | undefined>}
-              />
-            </div>
-          </div>
-          {!(msg.children?.length ?? 0) && (isSubmittingFamily === true || isSubmitting) ? (
-            <PlaceholderRow isCard={isCard} />
-          ) : (
-            <SubRow classes="text-xs">
-              <SiblingSwitch
-                siblingIdx={siblingIdx}
-                siblingCount={siblingCount}
-                setSiblingIdx={setSiblingIdx}
-              />
-              <HoverButtons
-                index={index}
-                isEditing={edit}
-                message={msg}
-                enterEdit={enterEdit}
-                isSubmitting={isSubmitting}
-                conversation={conversation ?? null}
-                regenerate={handleRegenerateMessage}
-                copyToClipboard={copyToClipboard}
-                handleContinue={handleContinue}
-                latestMessage={latestMessage}
-                isLast={isLast}
-              />
-            </SubRow>
-          )}
-        </div>
-      </div>
-    );
-  },
-);
+  return (
+    <MessageRow
+      id={msg.messageId}
+      icon={<MessageIcon iconData={iconData} assistant={assistant} agent={agent} />}
+      label={messageLabel ?? ''}
+      hoverLabel={getHeaderModelName(
+        agent?.model,
+        assistant?.model,
+        msg.model,
+        conversation?.model,
+      )}
+      timestamp={msg.createdAt ?? msg.clientTimestamp}
+      ariaLabel={getMessageAriaLabel(msg, localize)}
+      headerPrefix={getHeaderPrefixForScreenReader(msg, localize)}
+      isCreatedByUser={msg.isCreatedByUser === true}
+      hasParallelContent={hasParallelContent}
+      fullWidth={maximizeChatSpace}
+      isEditing={edit}
+      footer={
+        <SubRow classes={cn(messageFooterClasses, msg.isCreatedByUser && 'justify-end')}>
+          {/* While the answer is generating every other action is withheld, which
+              would otherwise leave this counter sitting alone under a half-written
+              response. It reveals on hover there, like the actions it sits with. */}
+          <SiblingSwitch
+            siblingIdx={siblingIdx}
+            siblingCount={siblingCount}
+            setSiblingIdx={setSiblingIdx}
+            className={cn(isSubmitting && isLatestMessage && revealOnRowHoverClasses)}
+          />
+          <HoverButtons
+            index={index}
+            message={msg}
+            isEditing={edit}
+            enterEdit={enterEdit}
+            isSubmitting={chatContext.isSubmitting}
+            conversation={conversation ?? null}
+            regenerate={handleRegenerateMessage}
+            copyToClipboard={copyToClipboard}
+            getCanCopy={getCanCopy}
+            handleContinue={handleContinue}
+            latestMessageId={latestMessageId}
+            handleFeedback={handleFeedback}
+            isLast={isLast}
+          />
+        </SubRow>
+      }
+    >
+      <ContentParts
+        edit={edit}
+        isLast={isLast}
+        enterEdit={enterEdit}
+        siblingIdx={siblingIdx}
+        messageId={msg.messageId}
+        attachments={attachments}
+        searchResults={searchResults}
+        manualSkills={msg.manualSkills}
+        authorHeader={authorHeader}
+        setSiblingIdx={setSiblingIdx}
+        isLatestMessage={isLatestMessage}
+        isSubmitting={isSubmitting}
+        isCreatedByUser={msg.isCreatedByUser}
+        createdAt={msg.createdAt ?? msg.clientTimestamp}
+        conversationId={conversation?.conversationId}
+        content={msg.content as Array<TMessageContentParts | undefined>}
+      />
+    </MessageRow>
+  );
+}, areContentRenderPropsEqual);
+ContentRender.displayName = 'ContentRender';
 
 export default ContentRender;

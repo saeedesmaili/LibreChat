@@ -1,24 +1,41 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useRecoilValue } from 'recoil';
-import type { TAttachment } from 'librechat-data-provider';
+import { SquareTerminal } from 'lucide-react';
+import type { TAttachment, PartMetadata } from 'librechat-data-provider';
+import { parseBackgroundHandle, splitBackgroundAttachments } from './handle';
 import ProgressText from '~/components/Chat/Messages/Content/ProgressText';
-import FinishedIcon from '~/components/Chat/Messages/Content/FinishedIcon';
-import MarkdownLite from '~/components/Chat/Messages/Content/MarkdownLite';
-import { CodeInProgress } from './CodeProgress';
-import Attachment from './Attachment';
-import LogContent from './LogContent';
-import { useProgress } from '~/hooks';
-import store from '~/store';
+import { sandboxStartingByToolCallId } from '~/store';
+import useLazyHighlight from './useLazyHighlight';
+import useToolCallState from './useToolCallState';
+import CodeWindowHeader from './CodeWindowHeader';
+import useFollowScroll from './useFollowScroll';
+import { AttachmentGroup } from './Attachment';
+import { useToolCallIntent } from './intent';
+import { useLocalize } from '~/hooks';
+import Stdout from './Stdout';
+import { cn } from '~/utils';
 
 interface ParsedArgs {
-  lang: string;
-  code: string;
+  lang?: string;
+  code?: string;
 }
 
-export function useParseArgs(args: string): ParsedArgs {
+export function useParseArgs(args?: string | Record<string, unknown>): ParsedArgs | null {
   return useMemo(() => {
-    const langMatch = args.match(/"lang"\s*:\s*"(\w+)"/);
-    const codeMatch = args.match(/"code"\s*:\s*"(.+?)(?="\s*,\s*"args"|$)/s);
+    if (typeof args === 'object' && args !== null) {
+      return { lang: String(args.lang ?? ''), code: String(args.code ?? '') };
+    }
+    let parsedArgs: ParsedArgs | string | undefined | null = args;
+    try {
+      parsedArgs = JSON.parse(args || '');
+    } catch {
+      // console.error('Failed to parse args:', e);
+    }
+    if (typeof parsedArgs === 'object') {
+      return parsedArgs;
+    }
+    const langMatch = args?.match(/"lang"\s*:\s*"(\w+)"/);
+    const codeMatch = args?.match(/"code"\s*:\s*"(.+?)(?="\s*,\s*"(session_id|args)"|"\s*})/s);
 
     let code = '';
     if (codeMatch) {
@@ -26,7 +43,7 @@ export function useParseArgs(args: string): ParsedArgs {
       if (code.endsWith('"}')) {
         code = code.slice(0, -2);
       }
-      code = code.replace(/\\n/g, '\n').replace(/\\/g, '');
+      code = code.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
     }
 
     return {
@@ -36,78 +53,156 @@ export function useParseArgs(args: string): ParsedArgs {
   }, [args]);
 }
 
+export const ERROR_PATTERNS = /^(Traceback|Error:|Exception:|.*Error:)/m;
+
 export default function ExecuteCode({
+  isSubmitting,
+  runStepStatus,
+  runStepDurationMs,
+  backgrounded,
   initialProgress = 0.1,
   args,
   output = '',
-  isSubmitting,
   attachments,
+  hideAttachments = false,
+  onExpand,
+  toolCallId,
 }: {
   initialProgress: number;
-  args: string;
-  output?: string;
   isSubmitting: boolean;
+  runStepStatus?: PartMetadata['runStepStatus'];
+  runStepDurationMs?: PartMetadata['runStepDurationMs'];
+  backgrounded?: PartMetadata['backgrounded'];
+  args?: string | Record<string, unknown>;
+  output?: string;
   attachments?: TAttachment[];
+  hideAttachments?: boolean;
+  onExpand?: () => void;
+  toolCallId?: string;
 }) {
-  const showAnalysisCode = useRecoilValue(store.showCode);
-  const [showCode, setShowCode] = useState(showAnalysisCode);
+  const localize = useLocalize();
+  const { lang = 'py', code } = useParseArgs(args) ?? ({} as ParsedArgs);
+  /** Model-authored live label, streamed as the first args key; persists as
+   *  the settled label (completion is a UI state, not a tense change). */
+  const intent = useToolCallIntent(args);
+  const sandboxStarting = useRecoilValue(sandboxStartingByToolCallId(toolCallId ?? ''));
 
-  const { lang, code } = useParseArgs(args);
-  const progress = useProgress(initialProgress);
+  const outputHasError = useMemo(() => ERROR_PATTERNS.test(output), [output]);
+  /** A backgrounded call's persisted output stays the dispatch handle until
+   *  the detached run settles and patches it; render a background state
+   *  instead of the handle JSON. Completion arrives live as the status marker
+   *  attachment (also covers stdout-only runs) or as harvested files.
+   *
+   *  Resolved before the phase, which folds `backgroundFailed` in: the
+   *  detached task's outcome is this card's outcome, and the dispatch step's
+   *  own output cannot express it. */
+  const backgroundHandle = useMemo(() => parseBackgroundHandle(output), [output]);
+  const { fileAttachments, backgroundStatus } = useMemo(
+    () => splitBackgroundAttachments(attachments, toolCallId),
+    [attachments, toolCallId],
+  );
+  const backgroundFailed = backgroundHandle != null && backgroundStatus === 'error';
+  const backgroundFinishedText = backgroundHandle
+    ? localize(
+        backgroundStatus != null || (fileAttachments?.length ?? 0) > 0
+          ? 'com_ui_background_finished'
+          : 'com_ui_background_running',
+      )
+    : null;
 
-  const radius = 56.08695652173913;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - progress * circumference;
+  const { showCode, toggleCode, expandStyle, expandRef, phase, hasOutput } = useToolCallState({
+    initialProgress,
+    isSubmitting,
+    output,
+    hasInput: !!code,
+    onExpand,
+    runStepStatus,
+    extraError: backgroundFailed,
+  });
+
+  const highlighted = useLazyHighlight(code, lang);
+  const { ref: codePaneRef, onScroll: onCodePaneScroll } = useFollowScroll<HTMLPreElement>(
+    highlighted ?? code ?? '',
+    phase === 'running',
+    showCode,
+  );
 
   return (
     <>
-      <div className="my-2.5 flex items-center gap-2.5">
-        <div className="relative h-5 w-5 shrink-0">
-          {progress < 1 ? (
-            <CodeInProgress
-              offset={offset}
-              radius={radius}
-              progress={progress}
-              isSubmitting={isSubmitting}
-              circumference={circumference}
-            />
-          ) : (
-            <FinishedIcon />
-          )}
-        </div>
+      <div className="relative my-1.5 flex h-5 shrink-0 items-center gap-2.5">
         <ProgressText
-          progress={progress}
-          onClick={() => setShowCode((prev) => !prev)}
-          inProgressText="Analyzing"
-          finishedText="Finished analyzing"
-          hasInput={!!code.length}
+          phase={phase}
+          onClick={toggleCode}
+          inProgressText={
+            intent ??
+            (sandboxStarting ? localize('com_ui_sandbox_starting') : localize('com_ui_analyzing'))
+          }
+          finishedText={
+            phase === 'cancelled'
+              ? localize('com_ui_cancelled')
+              : (backgroundFinishedText ?? intent ?? localize('com_ui_analyzing_finished'))
+          }
+          /** A backgrounded call's run step closes when dispatch returns the
+           *  handle, so its duration is the dispatch time — showing it would
+           *  misstate a detached task's runtime as seconds. The handle check
+           *  covers the live card; the persisted `backgrounded` marker covers
+           *  the card after harvest replaces the handle with real stdout
+           *  (and after any reload), when no transient signal survives. */
+          durationMs={
+            backgroundHandle == null && backgrounded !== true ? runStepDurationMs : undefined
+          }
+          icon={
+            <SquareTerminal
+              className={cn(
+                'size-4 shrink-0 text-text-secondary',
+                phase === 'running' && 'animate-pulse',
+              )}
+              aria-hidden="true"
+            />
+          }
+          hasInput={!!code?.length}
+          isExpanded={showCode}
         />
       </div>
-      {showCode && (
-        <div className="code-analyze-block mb-3 mt-0.5 overflow-hidden rounded-xl bg-black">
-          <MarkdownLite
-            content={code ? `\`\`\`${lang}\n${code}\n\`\`\`` : ''}
-            codeExecution={false}
-          />
-          {output.length > 0 && (
-            <div className="bg-gray-700 p-4 text-xs">
-              <div
-                className="prose flex flex-col-reverse text-white"
-                style={{
-                  color: 'white',
-                }}
+      <div style={expandStyle}>
+        <div className="overflow-hidden" ref={expandRef}>
+          <div className="my-2 overflow-hidden rounded-lg border border-border-light bg-surface-secondary">
+            {code && <CodeWindowHeader language={lang} code={code} />}
+            {code && (
+              <pre
+                ref={codePaneRef}
+                onScroll={onCodePaneScroll}
+                className="max-h-[300px] overflow-auto bg-surface-chat p-4 font-mono text-xs dark:bg-surface-primary-alt"
               >
-                <pre className="shrink-0">
-                  <LogContent output={output} attachments={attachments} />
-                </pre>
+                <code className={`hljs language-${lang} !whitespace-pre`}>{highlighted}</code>
+              </pre>
+            )}
+            {hasOutput && backgroundHandle == null && (
+              <div
+                className={cn(
+                  'bg-surface-primary-alt p-4 text-xs dark:bg-transparent',
+                  code && 'border-t border-border-light',
+                )}
+              >
+                <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-text-secondary">
+                  {localize('com_ui_output')}
+                </div>
+                <div
+                  className={cn(
+                    'max-h-[200px] overflow-auto',
+                    outputHasError ? 'text-status-error' : 'text-text-primary',
+                  )}
+                >
+                  <Stdout output={output} />
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
+      </div>
+      {!hideAttachments && fileAttachments && fileAttachments.length > 0 && (
+        <AttachmentGroup attachments={fileAttachments} />
       )}
-      {attachments?.map((attachment, index) => (
-        <Attachment attachment={attachment} key={index} />
-      ))}
     </>
   );
 }

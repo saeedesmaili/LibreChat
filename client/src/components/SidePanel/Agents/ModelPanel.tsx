@@ -1,28 +1,39 @@
 import React, { useMemo, useEffect } from 'react';
-import { ChevronLeft } from 'lucide-react';
-import { getSettingsKeys } from 'librechat-data-provider';
-import { useFormContext, Controller } from 'react-hook-form';
-import { useGetEndpointsQuery } from 'librechat-data-provider/react-query';
+import keyBy from 'lodash/keyBy';
+import { ChevronLeft, RotateCcw } from 'lucide-react';
+import { Button, ControlCombobox } from '@librechat/client';
+import { useFormContext, useWatch, Controller } from 'react-hook-form';
+import {
+  alternateName,
+  getSettingsKeys,
+  getEndpointField,
+  LocalStorageKeys,
+  SettingDefinition,
+  agentParamSettings,
+  applyModelAwareDefaults,
+} from 'librechat-data-provider';
 import type * as t from 'librechat-data-provider';
 import type { AgentForm, AgentModelPanelProps, StringOption } from '~/common';
 import { componentMapping } from '~/components/SidePanel/Parameters/components';
-import { agentSettings } from '~/components/SidePanel/Parameters/settings';
-import { getEndpointField, cn, cardStyle } from '~/utils';
-import { SelectDropDown } from '~/components/ui';
+import { useGetEndpointsQuery } from '~/data-provider';
+import { useLiveAnnouncer } from '~/Providers';
 import { useLocalize } from '~/hooks';
 import { Panel } from '~/common';
+import { cn } from '~/utils';
 
-export default function Parameters({
-  setActivePanel,
+export default function ModelPanel({
   providers,
+  setActivePanel,
   models: modelsData,
-}: AgentModelPanelProps) {
+}: Pick<AgentModelPanelProps, 'models' | 'providers' | 'setActivePanel'>) {
   const localize = useLocalize();
+  const { announcePolite } = useLiveAnnouncer();
 
-  const { control, setValue, watch } = useFormContext<AgentForm>();
-  const modelParameters = watch('model_parameters');
-  const providerOption = watch('provider');
-  const model = watch('model');
+  const { control, setValue } = useFormContext<AgentForm>();
+
+  const model = useWatch({ control, name: 'model' });
+  const providerOption = useWatch({ control, name: 'provider' });
+  const modelParameters = useWatch({ control, name: 'model_parameters' });
 
   const provider = useMemo(() => {
     const value =
@@ -32,7 +43,7 @@ export default function Parameters({
     return value ?? '';
   }, [providerOption]);
   const models = useMemo(
-    () => (provider ? modelsData[provider] ?? [] : []),
+    () => (provider ? (modelsData[provider] ?? []) : []),
     [modelsData, provider],
   );
 
@@ -44,6 +55,8 @@ export default function Parameters({
         const newModels = modelsData[provider] ?? [];
         setValue('model', newModels[0] ?? '');
       }
+      localStorage.setItem(LocalStorageKeys.LAST_AGENT_MODEL, _model);
+      localStorage.setItem(LocalStorageKeys.LAST_AGENT_PROVIDER, provider);
     }
 
     if (provider && !_model) {
@@ -51,7 +64,7 @@ export default function Parameters({
     }
   }, [provider, models, modelsData, setValue, model]);
 
-  const { data: endpointsConfig } = useGetEndpointsQuery();
+  const { data: endpointsConfig = {} } = useGetEndpointsQuery();
 
   const bedrockRegions = useMemo(() => {
     return endpointsConfig?.[provider]?.availableRegions ?? [];
@@ -62,39 +75,56 @@ export default function Parameters({
     [provider, endpointsConfig],
   );
 
-  const parameters = useMemo(() => {
+  const parameters = useMemo((): SettingDefinition[] => {
+    const customParams = endpointsConfig[provider]?.customParams ?? {};
     const [combinedKey, endpointKey] = getSettingsKeys(endpointType ?? provider, model ?? '');
-    return agentSettings[combinedKey] ?? agentSettings[endpointKey];
-  }, [endpointType, model, provider]);
+    const overriddenEndpointKey = customParams.defaultParamsEndpoint ?? endpointKey;
+    const defaultParams =
+      agentParamSettings[combinedKey] ?? agentParamSettings[overriddenEndpointKey] ?? [];
+    const overriddenParams = endpointsConfig[provider]?.customParams?.paramDefinitions ?? [];
+    const overriddenParamsMap = keyBy(overriddenParams, 'key');
+    const modelAwareParams = applyModelAwareDefaults(
+      defaultParams.filter((param) => param != null),
+      overriddenEndpointKey,
+      model ?? '',
+    );
+    return modelAwareParams.map(
+      (param) => (overriddenParamsMap[param.key] as SettingDefinition) ?? param,
+    );
+  }, [endpointType, endpointsConfig, model, provider]);
 
   const setOption = (optionKey: keyof t.AgentModelParameters) => (value: t.AgentParameterValue) => {
     setValue(`model_parameters.${optionKey}`, value);
   };
 
-  return (
-    <div className="scrollbar-gutter-stable h-full min-h-[50vh] overflow-auto pb-12 text-sm">
-      <div className="model-panel relative flex flex-col items-center px-16 py-6 text-center">
-        <div className="absolute left-0 top-6">
-          <button
-            type="button"
-            className="btn btn-neutral relative"
-            onClick={() => {
-              setActivePanel(Panel.builder);
-            }}
-          >
-            <div className="model-panel-content flex w-full items-center justify-center gap-2">
-              <ChevronLeft />
-            </div>
-          </button>
-        </div>
+  const handleResetParameters = () => {
+    setValue('model_parameters', {} as t.AgentModelParameters);
+    announcePolite({ message: localize('com_ui_model_parameters_reset'), isStatus: true });
+  };
 
-        <div className="mb-2 mt-2 text-xl font-medium">{localize('com_ui_model_parameters')}</div>
-      </div>
-      <div className="p-2">
+  return (
+    <div className="mb-1 flex w-full flex-col gap-3 text-sm">
+      <header className="grid grid-cols-[auto_1fr_auto] items-center gap-2 pt-1">
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => setActivePanel(Panel.builder)}
+          aria-label={localize('com_ui_back_to_builder')}
+          className="h-10 w-10 flex-shrink-0 rounded-xl text-text-secondary hover:bg-surface-secondary hover:text-text-primary"
+        >
+          <ChevronLeft className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
+        </Button>
+        <h2 className="text-center text-base font-semibold text-text-primary">
+          {localize('com_ui_model_parameters')}
+        </h2>
+        <span aria-hidden="true" className="h-10 w-10" />
+      </header>
+      <div>
         {/* Endpoint aka Provider for Agents */}
-        <div className="mb-4">
+        <div className="mb-3">
           <label
-            className="text-token-text-primary model-panel-label mb-2 block font-medium"
+            id="provider-label"
+            className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-text-secondary"
             htmlFor="provider"
           >
             {localize('com_ui_provider')} <span className="text-red-500">*</span>
@@ -103,41 +133,50 @@ export default function Parameters({
             name="provider"
             control={control}
             rules={{ required: true, minLength: 1 }}
-            render={({ field, fieldState: { error } }) => (
-              <>
-                <SelectDropDown
-                  emptyTitle={true}
-                  value={field.value ?? ''}
-                  title={localize('com_ui_provider')}
-                  placeholder={localize('com_ui_select_provider')}
-                  searchPlaceholder={localize('com_ui_select_search_provider')}
-                  setValue={field.onChange}
-                  availableValues={providers}
-                  showAbove={false}
-                  showLabel={false}
-                  className={cn(
-                    cardStyle,
-                    'flex h-9 w-full flex-none items-center justify-center border-none px-4 hover:cursor-pointer',
-                    (field.value === undefined || field.value === '') &&
-                      'border-2 border-yellow-400',
+            render={({ field, fieldState: { error } }) => {
+              const value =
+                typeof field.value === 'string'
+                  ? field.value
+                  : ((field.value as StringOption)?.value ?? '');
+              const display =
+                typeof field.value === 'string'
+                  ? field.value
+                  : ((field.value as StringOption)?.label ?? '');
+
+              return (
+                <>
+                  <ControlCombobox
+                    selectedValue={value}
+                    displayValue={alternateName[display] ?? display}
+                    selectPlaceholder={localize('com_ui_select_provider')}
+                    searchPlaceholder={localize('com_ui_select_search_provider')}
+                    setValue={field.onChange}
+                    items={providers.map((provider) => ({
+                      label: typeof provider === 'string' ? provider : provider.label,
+                      value: typeof provider === 'string' ? provider : provider.value,
+                    }))}
+                    className={cn(error ? 'border-2 border-red-500' : '')}
+                    ariaLabel={localize('com_ui_provider')}
+                    isCollapsed={false}
+                    showCarat={true}
+                  />
+                  {error && (
+                    <span className="mt-1 text-xs text-red-500" role="alert">
+                      {localize('com_ui_field_required')}
+                    </span>
                   )}
-                  containerClassName={cn('rounded-md', error ? 'border-red-500 border-2' : '')}
-                />
-                {error && (
-                  <span className="model-panel-error text-sm text-red-500 transition duration-300 ease-in-out">
-                    {localize('com_ui_field_required')}
-                  </span>
-                )}
-              </>
-            )}
+                </>
+              );
+            }}
           />
         </div>
         {/* Model */}
-        <div className="model-panel-section mb-4">
+        <div className="mb-3">
           <label
+            id="model-label"
             className={cn(
-              'text-token-text-primary model-panel-label mb-2 block font-medium',
-              !provider && 'text-gray-500 dark:text-gray-400',
+              'mb-1 block text-[11px] font-medium uppercase tracking-wide text-text-secondary',
+              !provider && 'opacity-60',
             )}
             htmlFor="model"
           >
@@ -147,43 +186,43 @@ export default function Parameters({
             name="model"
             control={control}
             rules={{ required: true, minLength: 1 }}
-            render={({ field, fieldState: { error } }) => (
-              <>
-                <SelectDropDown
-                  emptyTitle={true}
-                  placeholder={
-                    provider
-                      ? localize('com_ui_select_model')
-                      : localize('com_ui_select_provider_first')
-                  }
-                  value={field.value}
-                  setValue={field.onChange}
-                  availableValues={models}
-                  showAbove={false}
-                  showLabel={false}
-                  disabled={!provider}
-                  className={cn(
-                    cardStyle,
-                    'flex h-[40px] w-full flex-none items-center justify-center border-none px-4',
-                    !provider ? 'cursor-not-allowed bg-gray-200' : 'hover:cursor-pointer',
+            render={({ field, fieldState: { error } }) => {
+              return (
+                <>
+                  <ControlCombobox
+                    selectedValue={field.value || ''}
+                    selectPlaceholder={
+                      provider
+                        ? localize('com_ui_select_model')
+                        : localize('com_ui_select_provider_first')
+                    }
+                    searchPlaceholder={localize('com_ui_select_model')}
+                    setValue={field.onChange}
+                    items={models.map((model) => ({
+                      label: model,
+                      value: model,
+                    }))}
+                    disabled={!provider}
+                    className={cn('disabled:opacity-50', error ? 'border-2 border-red-500' : '')}
+                    ariaLabel={localize('com_ui_model')}
+                    isCollapsed={false}
+                    showCarat={true}
+                  />
+                  {provider && error && (
+                    <span className="mt-1 text-xs text-red-500" role="alert">
+                      {localize('com_ui_field_required')}
+                    </span>
                   )}
-                  containerClassName={cn('rounded-md', error ? 'border-red-500 border-2' : '')}
-                />
-                {provider && error && (
-                  <span className="text-sm text-red-500 transition duration-300 ease-in-out">
-                    {localize('com_ui_field_required')}
-                  </span>
-                )}
-              </>
-            )}
+                </>
+              );
+            }}
           />
         </div>
       </div>
       {/* Model Parameters */}
       {parameters && (
-        <div className="h-auto max-w-full overflow-x-hidden p-2">
-          <div className="grid grid-cols-4 gap-6">
-            {' '}
+        <div className="h-auto max-w-full">
+          <div className="grid grid-cols-2 gap-3">
             {/* This is the parent element containing all settings */}
             {/* Below is an example of an applied dynamic setting, each be contained by a div with the column span specified */}
             {parameters.map((setting) => {
@@ -211,6 +250,15 @@ export default function Parameters({
           </div>
         </div>
       )}
+      {/* Reset Parameters Button */}
+      <Button
+        variant="outline"
+        onClick={handleResetParameters}
+        className="mt-2 h-9 w-full rounded-xl px-4 font-medium text-text-secondary hover:bg-surface-secondary hover:text-text-primary"
+      >
+        <RotateCcw className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
+        {localize('com_ui_reset_var', { 0: localize('com_ui_model_parameters') })}
+      </Button>
     </div>
   );
 }

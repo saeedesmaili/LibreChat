@@ -1,66 +1,139 @@
+import { memo, useMemo } from 'react';
 import { useRecoilValue } from 'recoil';
-import { useAuthContext, useLocalize } from '~/hooks';
-import type { TMessageProps } from '~/common';
+import type { TMessage } from 'librechat-data-provider';
+import type { TMessageProps, TMessageIcon } from '~/common';
+import AuthorHeader from '~/components/Chat/Messages/Content/Parts/AuthorHeader';
 import MinimalHoverButtons from '~/components/Chat/Messages/MinimalHoverButtons';
+import { getHeaderModelName } from '~/components/Chat/Messages/ui/HeaderLabel';
+import { getHeaderPrefixForScreenReader, getMessageAriaLabel } from '~/utils';
+import MessageRow from '~/components/Chat/Messages/ui/MessageRow';
 import Icon from '~/components/Chat/Messages/MessageIcon';
+import { useAuthContext, useLocalize } from '~/hooks';
 import SearchContent from './Content/SearchContent';
 import SearchButtons from './SearchButtons';
 import SubRow from './SubRow';
-import { cn } from '~/utils';
 import store from '~/store';
 
-export default function Message({ message }: Pick<TMessageProps, 'message'>) {
+function searchFilesEqual(prev?: TMessage['files'], next?: TMessage['files']) {
+  if (prev === next) {
+    return true;
+  }
+  const prevLen = prev?.length ?? 0;
+  const nextLen = next?.length ?? 0;
+  if (prevLen !== nextLen) {
+    return false;
+  }
+  return prev?.every((file, index) => file.file_id === next?.[index]?.file_id) ?? true;
+}
+
+/**
+ * Field-level comparator for `memo(SearchMessage)`. The virtualized `rowRenderer`
+ * closure and the file-remap `useMemo` in the Search route can hand a fresh
+ * `message` object with identical content on every parent render, so a shallow
+ * compare would defeat the memo — compare only the fields that drive the row.
+ */
+export function areSearchMessagePropsEqual(
+  prev: Pick<TMessageProps, 'message'>,
+  next: Pick<TMessageProps, 'message'>,
+): boolean {
+  const a = prev.message;
+  const b = next.message;
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return a === b;
+  }
+  return (
+    a.messageId === b.messageId &&
+    a.text === b.text &&
+    a.content === b.content &&
+    a.createdAt === b.createdAt &&
+    /** Timestamp falls back to `clientTimestamp` when `createdAt` is absent. */
+    a.clientTimestamp === b.clientTimestamp &&
+    a.isCreatedByUser === b.isCreatedByUser &&
+    a.sender === b.sender &&
+    a.model === b.model &&
+    a.endpoint === b.endpoint &&
+    a.iconURL === b.iconURL &&
+    /** `SearchContent` renders an incomplete-response notice on `unfinished`. */
+    a.unfinished === b.unfinished &&
+    /** `SearchButtons` renders `title` and navigates by `conversationId`, so a
+     *  rename/refetch that leaves the text and id intact must still re-render. */
+    a.title === b.title &&
+    a.conversationId === b.conversationId &&
+    searchFilesEqual(a.files, b.files)
+  );
+}
+
+function SearchMessage({ message }: Pick<TMessageProps, 'message'>) {
   const UsernameDisplay = useRecoilValue<boolean>(store.UsernameDisplay);
-  const fontSize = useRecoilValue(store.fontSize);
   const { user } = useAuthContext();
   const localize = useLocalize();
+
+  const iconData: TMessageIcon = useMemo(
+    () => ({
+      endpoint: message?.endpoint ?? '',
+      model: message?.model ?? '',
+      iconURL: message?.iconURL ?? '',
+      isCreatedByUser: message?.isCreatedByUser ?? false,
+    }),
+    [message?.endpoint, message?.model, message?.iconURL, message?.isCreatedByUser],
+  );
+
+  const messageLabel = useMemo(() => {
+    if (message?.isCreatedByUser) {
+      return UsernameDisplay
+        ? (user?.name ?? '') || (user?.username ?? '')
+        : localize('com_user_message');
+    }
+    return message?.sender ?? '';
+  }, [
+    message?.isCreatedByUser,
+    message?.sender,
+    UsernameDisplay,
+    user?.name,
+    user?.username,
+    localize,
+  ]);
+
+  const authorHeader = useMemo(
+    () =>
+      message?.isCreatedByUser === true ? undefined : (
+        <AuthorHeader icon={<Icon iconData={iconData} />} label={messageLabel} />
+      ),
+    [message?.isCreatedByUser, iconData, messageLabel],
+  );
 
   if (!message) {
     return null;
   }
 
-  const { isCreatedByUser } = message;
-
-  let messageLabel = '';
-  if (isCreatedByUser) {
-    messageLabel = UsernameDisplay
-      ? (user?.name ?? '') || (user?.username ?? '')
-      : localize('com_user_message');
-  } else {
-    messageLabel = message.sender || '';
-  }
-
   return (
-    <>
-      <div className="text-token-text-primary w-full border-0 bg-transparent dark:border-0 dark:bg-transparent">
-        <div className="m-auto justify-center p-4 py-2 md:gap-6 ">
-          <div className="final-completion group mx-auto flex flex-1 gap-3 md:max-w-3xl md:px-5 lg:max-w-[40rem] lg:px-1 xl:max-w-[48rem] xl:px-5">
-            <div className="relative flex flex-shrink-0 flex-col items-end">
-              <div>
-                <div className="pt-0.5">
-                  <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-full">
-                    <Icon message={message} />
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div
-              className={cn('relative flex w-11/12 flex-col', isCreatedByUser ? '' : 'agent-turn')}
-            >
-              <div className={cn('select-none font-semibold', fontSize)}>{messageLabel}</div>
-              <div className="flex-col gap-1 md:gap-3">
-                <div className="flex max-w-full flex-grow flex-col gap-0">
-                  <SearchContent message={message} />
-                </div>
-              </div>
-              <SubRow classes="text-xs">
-                <MinimalHoverButtons message={message} />
-                <SearchButtons message={message} />
-              </SubRow>
-            </div>
-          </div>
-        </div>
+    <div className="w-full bg-transparent text-text-primary">
+      <div className="m-auto px-4 py-3 sm:px-0">
+        <MessageRow
+          id={message.messageId}
+          icon={<Icon iconData={iconData} />}
+          label={messageLabel}
+          hoverLabel={getHeaderModelName(message.model)}
+          timestamp={message.createdAt ?? message.clientTimestamp}
+          ariaLabel={getMessageAriaLabel(message, localize)}
+          headerPrefix={getHeaderPrefixForScreenReader(message, localize)}
+          isCreatedByUser={message.isCreatedByUser === true}
+          className="final-completion"
+          footer={
+            <SubRow classes={message.isCreatedByUser ? 'justify-end text-xs' : 'text-xs'}>
+              <MinimalHoverButtons message={message} />
+              <SearchButtons message={message} />
+            </SubRow>
+          }
+        >
+          <SearchContent message={message} authorHeader={authorHeader} />
+        </MessageRow>
       </div>
-    </>
+    </div>
   );
 }
+
+export default memo(SearchMessage, areSearchMessagePropsEqual);

@@ -1,77 +1,188 @@
+import React, { useCallback, useEffect, useRef, useMemo, useState } from 'react';
 import { v4 } from 'uuid';
 import debounce from 'lodash/debounce';
+import { useToastContext } from '@librechat/client';
 import { useQueryClient } from '@tanstack/react-query';
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
 import {
-  megabyte,
   QueryKeys,
-  EModelEndpoint,
-  codeTypeMapping,
+  Constants,
+  EToolResources,
   mergeFileConfig,
-  isAgentsEndpoint,
   isAssistantsEndpoint,
+  getEndpointFileConfig,
   defaultAssistantsVersion,
-  fileConfig as defaultFileConfig,
 } from 'librechat-data-provider';
-import type { TEndpointsConfig, TError } from 'librechat-data-provider';
+import type { EModelEndpoint, TEndpointsConfig, TError } from 'librechat-data-provider';
+import type { TConversation } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
-import { useUploadFileMutation, useGetFileConfig } from '~/data-provider';
+import {
+  logger,
+  validateFiles,
+  cachePreview,
+  validateFileSizes,
+  getCachedPreview,
+  removePreviewEntry,
+  validateFileDuplicates,
+} from '~/utils';
+import { useGetFileConfig, useUploadFileMutation } from '~/data-provider';
+import useLocalize, { TranslationKeys } from '~/hooks/useLocalize';
 import { useDelayedUploadToast } from './useDelayedUploadToast';
-import { useToastContext } from '~/Providers/ToastContext';
 import { useChatContext } from '~/Providers/ChatContext';
-import useLocalize from '~/hooks/useLocalize';
+import store, { ephemeralAgentByConvoId } from '~/store';
+import useClientResize from './useClientResize';
 import useUpdateFiles from './useUpdateFiles';
-import { logger } from '~/utils';
-
-const { checkType } = defaultFileConfig;
 
 type UseFileHandling = {
-  overrideEndpoint?: EModelEndpoint;
   fileSetter?: FileSetter;
   fileFilter?: (file: File) => boolean;
   additionalMetadata?: Record<string, string | undefined>;
+  /** Overrides `endpoint` for upload routing; also used as `endpointType` fallback when `endpointTypeOverride` is not set */
+  endpointOverride?: EModelEndpoint | string;
+  /** Overrides `endpointType` independently from `endpointOverride` */
+  endpointTypeOverride?: EModelEndpoint | string;
 };
 
-const useFileHandling = (params?: UseFileHandling) => {
+export type FileHandlingState = {
+  files: Map<string, ExtendedFile>;
+  setFiles: FileSetter;
+  setFilesLoading?: React.Dispatch<React.SetStateAction<boolean>>;
+  conversation?: TConversation | null;
+};
+
+type ProcessedUpload = {
+  extendedFile: ExtendedFile;
+  preview: string;
+  resizeDetails?: {
+    originalSize: number;
+    newSize: number;
+    compressionRatio: number;
+  };
+};
+
+export type UploadLifecycleCallbacks = {
+  /** Preassigned id so callers can persist recovery before the shared upload queue waits. */
+  fileId?: string;
+  /** Read once the queue and config waits are over, immediately before the batch is written into
+   * the shared file state. A `false` return abandons the batch so a delayed upload cannot land in
+   * a composer the user has since navigated away from. */
+  shouldCommit?: () => boolean;
+  onStart?: (fileId: string) => void;
+  onSuccess?: (fileId: string) => void;
+  onError?: (fileId: string) => void;
+  onAbort?: (fileId: string) => void;
+};
+
+const noop = () => {};
+const uploadErrorCallbacks = new Map<string, UploadLifecycleCallbacks>();
+
+const takeUploadRecovery = (fileId: string): UploadLifecycleCallbacks | undefined => {
+  const callbacks = uploadErrorCallbacks.get(fileId);
+  uploadErrorCallbacks.delete(fileId);
+  return callbacks;
+};
+
+export const clearUploadRecovery = (fileId: string) => {
+  takeUploadRecovery(fileId)?.onAbort?.(fileId);
+};
+
+export const hasInFlightUpload = (fileId: string): boolean => uploadErrorCallbacks.has(fileId);
+
+type UploadScope = {
+  queue: Promise<void>;
+  /** Accepted uploads that have not been observed in the shared file state yet */
+  recent: Map<string, ExtendedFile>;
+};
+
+/**
+ * Upload batches are validated against the file map they write to, so every hook instance
+ * sharing a setter (attachment menu, paste routing, SharePoint) must share one queue.
+ */
+const uploadScopes = new WeakMap<FileSetter, UploadScope>();
+
+const getUploadScope = (fileSetter: FileSetter): UploadScope => {
+  const scope = uploadScopes.get(fileSetter);
+  if (scope != null) {
+    return scope;
+  }
+
+  const created: UploadScope = { queue: Promise.resolve(), recent: new Map() };
+  uploadScopes.set(fileSetter, created);
+  return created;
+};
+
+const mergeRecentUploads = (
+  files: Map<string, ExtendedFile>,
+  recent: Map<string, ExtendedFile>,
+): Map<string, ExtendedFile> => {
+  if (recent.size === 0) {
+    return files;
+  }
+
+  const merged = new Map(files);
+  for (const [file_id, extendedFile] of recent) {
+    if (!merged.has(file_id)) {
+      merged.set(file_id, extendedFile);
+    }
+  }
+  return merged;
+};
+
+const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: FileHandlingState) => {
   const localize = useLocalize();
   const queryClient = useQueryClient();
   const { showToast } = useToastContext();
   const [errors, setErrors] = useState<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { startUploadTimer, clearUploadTimer } = useDelayedUploadToast();
-  const [toolResource, setToolResource] = useState<string | undefined>();
-  const { files, setFiles, setFilesLoading, conversation } = useChatContext();
-  const setError = (error: string) => setErrors((prevErrors) => [...prevErrors, error]);
-  const { addFile, replaceFile, updateFileById, deleteFileById } = useUpdateFiles(
-    params?.fileSetter ?? setFiles,
+  const { files, setFiles, conversation } = fileState;
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const fileSetter = params?.fileSetter ?? setFiles;
+  const uploadScope = getUploadScope(fileSetter);
+  /** Reservations are only observable when the rendered state is the state being written */
+  const tracksReservations = fileSetter === setFiles;
+  if (tracksReservations) {
+    for (const file_id of uploadScope.recent.keys()) {
+      if (files.has(file_id)) {
+        uploadScope.recent.delete(file_id);
+      }
+    }
+  }
+  const setFilesLoading = fileState.setFilesLoading ?? noop;
+  const setEphemeralAgent = useSetRecoilState(
+    ephemeralAgentByConvoId(conversation?.conversationId ?? Constants.NEW_CONVO),
   );
+  const isTemporary = useRecoilValue(store.isTemporary);
+  const setError = (error: string) => setErrors((prevErrors) => [...prevErrors, error]);
+  const { addFile, replaceFile, updateFileById, deleteFileById } = useUpdateFiles(fileSetter);
+  const { isConfigPending, waitForConfig, resizeImageIfNeeded } = useClientResize();
 
   const agent_id = params?.additionalMetadata?.agent_id ?? '';
   const assistant_id = params?.additionalMetadata?.assistant_id ?? '';
+  const isConversationUpload = !agent_id && !assistant_id;
+  const endpointOverride = params?.endpointOverride;
+  const endpointTypeOverride = params?.endpointTypeOverride;
+  const endpointType = useMemo(
+    () => endpointTypeOverride ?? endpointOverride ?? conversation?.endpointType,
+    [endpointTypeOverride, endpointOverride, conversation?.endpointType],
+  );
+  const endpoint = useMemo(
+    () => endpointOverride ?? conversation?.endpoint ?? 'default',
+    [endpointOverride, conversation?.endpoint],
+  );
 
   const { data: fileConfig = null } = useGetFileConfig({
     select: (data) => mergeFileConfig(data),
   });
-
-  const endpoint = useMemo(
-    () =>
-      params?.overrideEndpoint ?? conversation?.endpointType ?? conversation?.endpoint ?? 'default',
-    [params?.overrideEndpoint, conversation?.endpointType, conversation?.endpoint],
-  );
-
-  const { fileLimit, fileSizeLimit, totalSizeLimit, supportedMimeTypes } = useMemo(
-    () =>
-      fileConfig?.endpoints[endpoint] ??
-      fileConfig?.endpoints.default ??
-      defaultFileConfig.endpoints[endpoint] ??
-      defaultFileConfig.endpoints.default,
-    [fileConfig, endpoint],
-  );
+  const fileConfigRef = useRef(fileConfig);
+  fileConfigRef.current = fileConfig;
 
   const displayToast = useCallback(() => {
     if (errors.length > 1) {
+      // TODO: this should not be a dynamic localize input!!
       const errorList = Array.from(new Set(errors))
-        .map((e, i) => `${i > 0 ? '• ' : ''}${localize(e) || e}\n`)
+        .map((e, i) => `${i > 0 ? '• ' : ''}${localize(e as TranslationKeys) || e}\n`)
         .join('');
       showToast({
         message: errorList,
@@ -79,7 +190,8 @@ const useFileHandling = (params?: UseFileHandling) => {
         duration: 5000,
       });
     } else if (errors.length === 1) {
-      const message = localize(errors[0]) || errors[0];
+      // TODO: this should not be a dynamic localize input!!
+      const message = localize(errors[0] as TranslationKeys) || errors[0];
       showToast({
         message,
         status: 'error',
@@ -103,6 +215,7 @@ const useFileHandling = (params?: UseFileHandling) => {
   const uploadFile = useUploadFileMutation(
     {
       onSuccess: (data) => {
+        takeUploadRecovery(data.temp_file_id)?.onSuccess?.(data.temp_file_id);
         clearUploadTimer(data.temp_file_id);
         console.log('upload success', data);
         if (agent_id) {
@@ -119,6 +232,11 @@ const useFileHandling = (params?: UseFileHandling) => {
         );
 
         setTimeout(() => {
+          const cachedBlob = getCachedPreview(data.temp_file_id);
+          if (cachedBlob && data.file_id !== data.temp_file_id) {
+            cachePreview(data.file_id, cachedBlob);
+            removePreviewEntry(data.temp_file_id);
+          }
           updateFileById(
             data.temp_file_id,
             {
@@ -140,30 +258,66 @@ const useFileHandling = (params?: UseFileHandling) => {
       onError: (_error, body) => {
         const error = _error as TError | undefined;
         console.log('upload error', error);
-        const file_id = body.get('file_id');
-        clearUploadTimer(file_id as string);
-        deleteFileById(file_id as string);
-        const errorMessage =
-          error?.code === 'ERR_CANCELED'
-            ? 'com_error_files_upload_canceled'
-            : error?.response?.data?.message ?? 'com_error_files_upload';
+        const file_id = body.get('file_id') as string;
+        const uploadLifecycle = takeUploadRecovery(file_id);
+        const tool_resource = body.get('tool_resource');
+        if (tool_resource === EToolResources.execute_code) {
+          setEphemeralAgent((prev) => ({
+            ...prev,
+            [EToolResources.execute_code]: false,
+          }));
+        }
+        clearUploadTimer(file_id);
+        deleteFileById(file_id);
+
+        let errorMessage = 'com_error_files_upload';
+
+        if (error?.code === 'ERR_CANCELED') {
+          errorMessage = 'com_error_files_upload_canceled';
+        } else if (error?.response?.data?.message) {
+          errorMessage = error.response.data.message;
+        }
         setError(errorMessage);
-      },
-      onMutate: () => {
-        setToolResource(undefined);
+        uploadLifecycle?.onError?.(file_id);
       },
     },
     abortControllerRef.current?.signal,
   );
 
-  const startUpload = async (extendedFile: ExtendedFile) => {
+  const uploadWithRecovery = (
+    formData: FormData,
+    file_id: string,
+    uploadLifecycle?: UploadLifecycleCallbacks,
+  ) => {
+    if (uploadLifecycle) {
+      uploadErrorCallbacks.set(file_id, uploadLifecycle);
+      uploadLifecycle.onStart?.(file_id);
+    }
+    uploadFile.mutate(formData);
+  };
+
+  const startUpload = async (
+    extendedFile: ExtendedFile,
+    uploadLifecycle?: UploadLifecycleCallbacks,
+  ) => {
     const filename = extendedFile.file?.name ?? 'File';
     startUploadTimer(extendedFile.file_id, filename, extendedFile.size);
 
     const formData = new FormData();
     formData.append('endpoint', endpoint);
+    formData.append('endpointType', endpointType ?? '');
     formData.append('file', extendedFile.file as File, encodeURIComponent(filename));
     formData.append('file_id', extendedFile.file_id);
+    if (
+      isConversationUpload &&
+      conversation?.conversationId &&
+      conversation.conversationId !== Constants.NEW_CONVO
+    ) {
+      formData.append('conversationId', conversation.conversationId);
+    }
+    if (isTemporary && isConversationUpload) {
+      formData.append('isTemporary', 'true');
+    }
 
     const width = extendedFile.width ?? 0;
     const height = extendedFile.height ?? 0;
@@ -183,20 +337,19 @@ const useFileHandling = (params?: UseFileHandling) => {
       }
     }
 
-    if (isAgentsEndpoint(endpoint)) {
+    if (!isAssistantsEndpoint(endpointType ?? endpoint)) {
       if (!agent_id) {
         formData.append('message_file', 'true');
       }
-      if (toolResource != null) {
-        formData.append('tool_resource', toolResource);
+      const tool_resource = extendedFile.tool_resource;
+      if (tool_resource != null) {
+        formData.append('tool_resource', tool_resource);
       }
       if (conversation?.agent_id != null && formData.get('agent_id') == null) {
         formData.append('agent_id', conversation.agent_id);
       }
-    }
 
-    if (!isAssistantsEndpoint(endpoint)) {
-      uploadFile.mutate(formData);
+      uploadWithRecovery(formData, extendedFile.file_id, uploadLifecycle);
       return;
     }
 
@@ -226,91 +379,14 @@ const useFileHandling = (params?: UseFileHandling) => {
       formData.append('model', convoModel);
     }
 
-    uploadFile.mutate(formData);
+    uploadWithRecovery(formData, extendedFile.file_id, uploadLifecycle);
   };
 
-  const validateFiles = useCallback(
-    (fileList: File[]) => {
-      const existingFiles = Array.from(files.values());
-      const incomingTotalSize = fileList.reduce((total, file) => total + file.size, 0);
-      if (incomingTotalSize === 0) {
-        setError('com_error_files_empty');
-        return false;
-      }
-      const currentTotalSize = existingFiles.reduce((total, file) => total + file.size, 0);
-
-      if (fileList.length + files.size > fileLimit) {
-        setError(`You can only upload up to ${fileLimit} files at a time.`);
-        return false;
-      }
-
-      for (let i = 0; i < fileList.length; i++) {
-        let originalFile = fileList[i];
-        let fileType = originalFile.type;
-        const extension = originalFile.name.split('.').pop() ?? '';
-        const knownCodeType = codeTypeMapping[extension];
-
-        // Infer MIME type for Known Code files when the type is empty or a mismatch
-        if (knownCodeType && (!fileType || fileType !== knownCodeType)) {
-          fileType = knownCodeType;
-        }
-
-        // Check if the file type is still empty after the extension check
-        if (!fileType) {
-          setError('Unable to determine file type for: ' + originalFile.name);
-          return false;
-        }
-
-        // Replace empty type with inferred type
-        if (originalFile.type !== fileType) {
-          const newFile = new File([originalFile], originalFile.name, { type: fileType });
-          originalFile = newFile;
-          fileList[i] = newFile;
-        }
-
-        if (!checkType(originalFile.type, supportedMimeTypes)) {
-          console.log(originalFile);
-          setError('Currently, unsupported file type: ' + originalFile.type);
-          return false;
-        }
-
-        if (originalFile.size >= fileSizeLimit) {
-          setError(`File size exceeds ${fileSizeLimit / megabyte} MB.`);
-          return false;
-        }
-      }
-
-      if (currentTotalSize + incomingTotalSize > totalSizeLimit) {
-        setError(`The total size of the files cannot exceed ${totalSizeLimit / megabyte} MB.`);
-        return false;
-      }
-
-      const combinedFilesInfo = [
-        ...existingFiles.map(
-          (file) =>
-            `${file.file?.name ?? file.filename}-${file.size}-${
-              file.type?.split('/')[0] ?? 'file'
-            }`,
-        ),
-        ...fileList.map(
-          (file: File | undefined) =>
-            `${file?.name}-${file?.size}-${file?.type.split('/')[0] ?? 'file'}`,
-        ),
-      ];
-
-      const uniqueFilesSet = new Set(combinedFilesInfo);
-
-      if (uniqueFilesSet.size !== combinedFilesInfo.length) {
-        setError('com_error_files_dupe');
-        return false;
-      }
-
-      return true;
-    },
-    [files, fileLimit, fileSizeLimit, totalSizeLimit, supportedMimeTypes],
-  );
-
-  const loadImage = (extendedFile: ExtendedFile, preview: string) => {
+  const loadImage = (
+    extendedFile: ExtendedFile,
+    preview: string,
+    uploadLifecycle?: UploadLifecycleCallbacks,
+  ) => {
     const img = new Image();
     img.onload = async () => {
       extendedFile.width = img.width;
@@ -321,85 +397,337 @@ const useFileHandling = (params?: UseFileHandling) => {
       };
       replaceFile(extendedFile);
 
-      await startUpload(extendedFile);
-      URL.revokeObjectURL(preview);
+      await startUpload(extendedFile, uploadLifecycle);
     };
     img.src = preview;
   };
 
-  const handleFiles = async (_files: FileList | File[]) => {
+  /** Resolves to whether the files passed validation and were accepted for upload. */
+  const processFiles = async (
+    fileList: File[],
+    _toolResource?: string,
+    uploadLifecycle?: UploadLifecycleCallbacks,
+  ): Promise<boolean> => {
     abortControllerRef.current = new AbortController();
-    const fileList = Array.from(_files);
+
+    const existingFiles = tracksReservations
+      ? mergeRecentUploads(filesRef.current, uploadScope.recent)
+      : filesRef.current;
+    const currentFileConfig = fileConfigRef.current;
+    const endpointFileConfig = getEndpointFileConfig({
+      endpoint,
+      fileConfig: currentFileConfig,
+      endpointType,
+    });
+
     /* Validate files */
     let filesAreValid: boolean;
     try {
-      filesAreValid = validateFiles(fileList);
+      filesAreValid = validateFiles({
+        files: existingFiles,
+        fileList,
+        setError,
+        fileConfig: currentFileConfig,
+        endpointFileConfig,
+        toolResource: _toolResource,
+        skipSizeValidation: true,
+      });
     } catch (error) {
       console.error('file validation error', error);
       setError('com_error_files_validation');
-      return;
+      setFilesLoading(false);
+      return false;
     }
     if (!filesAreValid) {
       setFilesLoading(false);
-      return;
+      return false;
     }
 
     /* Process files */
-    for (const originalFile of fileList) {
-      const file_id = v4();
+    const processedUploads: ProcessedUpload[] = [];
+    for (const [fileIndex, originalFile] of fileList.entries()) {
+      const file_id =
+        fileIndex === 0 && uploadLifecycle?.fileId != null && uploadLifecycle.fileId !== ''
+          ? uploadLifecycle.fileId
+          : v4();
       try {
-        const preview = URL.createObjectURL(originalFile);
-        const extendedFile: ExtendedFile = {
+        // Create initial preview with original file
+        const initialPreview = URL.createObjectURL(originalFile);
+        cachePreview(file_id, initialPreview);
+
+        // Create initial ExtendedFile to show immediately
+        const initialExtendedFile: ExtendedFile = {
           file_id,
           file: originalFile,
           type: originalFile.type,
-          preview,
-          progress: 0.2,
+          preview: initialPreview,
+          progress: 0.1, // Show as processing
           size: originalFile.size,
         };
 
-        addFile(extendedFile);
-
-        if (originalFile.type.split('/')[0] === 'image') {
-          loadImage(extendedFile, preview);
-          continue;
+        if (_toolResource != null && _toolResource !== '') {
+          initialExtendedFile.tool_resource = _toolResource;
         }
 
-        await startUpload(extendedFile);
+        // Add file immediately to show in UI
+        addFile(initialExtendedFile);
+
+        const originalFileName = originalFile.name.toLowerCase();
+
+        // Check if HEIC conversion is needed and show toast
+        const isHEIC =
+          originalFile.type === 'image/heic' ||
+          originalFile.type === 'image/heif' ||
+          /\.(heic|heif)$/.test(originalFileName);
+
+        if (isHEIC) {
+          showToast({
+            message: localize('com_info_heic_converting'),
+            status: 'info',
+            duration: 3000,
+          });
+        }
+
+        const heicProcessedFile = isHEIC
+          ? await import('~/utils/heicConverter').then(({ processFileForUpload }) =>
+              processFileForUpload(originalFile, 0.9, (conversionProgress) => {
+                const adjustedProgress = 0.1 + conversionProgress * 0.4;
+                replaceFile({
+                  ...initialExtendedFile,
+                  progress: adjustedProgress,
+                });
+              }),
+            )
+          : originalFile;
+
+        let finalProcessedFile = heicProcessedFile;
+        let resizeDetails: ProcessedUpload['resizeDetails'];
+
+        // Apply client-side resizing if available and appropriate
+        if (heicProcessedFile.type.startsWith('image/')) {
+          try {
+            const resizeResult = await resizeImageIfNeeded(heicProcessedFile);
+            finalProcessedFile = resizeResult.file;
+
+            if (resizeResult.resized && resizeResult.result) {
+              const { originalSize, newSize, compressionRatio } = resizeResult.result;
+              resizeDetails = { originalSize, newSize, compressionRatio };
+            }
+          } catch (resizeError) {
+            console.warn('Image resize failed, using original:', resizeError);
+            // Continue with HEIC processed file if resizing fails
+          }
+        }
+
+        // If file was processed (HEIC converted or resized), update with new file and preview
+        if (finalProcessedFile !== originalFile) {
+          URL.revokeObjectURL(initialPreview); // Clean up original preview
+          const newPreview = URL.createObjectURL(finalProcessedFile);
+          cachePreview(file_id, newPreview);
+
+          const updatedExtendedFile: ExtendedFile = {
+            ...initialExtendedFile,
+            file: finalProcessedFile,
+            type: finalProcessedFile.type,
+            preview: newPreview,
+            progress: 0.5, // Processing complete, ready for upload
+            size: finalProcessedFile.size,
+          };
+
+          replaceFile(updatedExtendedFile);
+          processedUploads.push({
+            extendedFile: updatedExtendedFile,
+            preview: newPreview,
+            resizeDetails,
+          });
+        } else {
+          // Update progress to show ready for upload
+          const readyExtendedFile = {
+            ...initialExtendedFile,
+            progress: 0.2,
+          };
+          replaceFile(readyExtendedFile);
+          processedUploads.push({
+            extendedFile: readyExtendedFile,
+            preview: initialPreview,
+            resizeDetails,
+          });
+        }
       } catch (error) {
         deleteFileById(file_id);
         console.log('file handling error', error);
-        setError('com_error_files_process');
+        if (error instanceof Error && error.message.includes('HEIC')) {
+          setError('com_error_heic_conversion');
+        } else {
+          setError('com_error_files_process');
+        }
       }
+    }
+
+    const discardProcessedUploads = () => {
+      for (const { extendedFile, preview } of processedUploads) {
+        deleteFileById(extendedFile.file_id);
+        removePreviewEntry(extendedFile.file_id);
+        URL.revokeObjectURL(preview);
+      }
+      filesRef.current = existingFiles;
+    };
+
+    const processedFileList = processedUploads.map(({ extendedFile }) => extendedFile.file as File);
+
+    let batchIsValid: boolean;
+    try {
+      batchIsValid =
+        validateFileDuplicates({
+          files: existingFiles,
+          fileList: processedFileList,
+          setError,
+        }) &&
+        validateFileSizes({
+          files: existingFiles,
+          fileList: processedFileList,
+          setError,
+          endpointFileConfig,
+        });
+    } catch (error) {
+      console.error('file validation error', error);
+      setError('com_error_files_validation');
+      discardProcessedUploads();
+      setFilesLoading(false);
+      return false;
+    }
+    if (!batchIsValid) {
+      discardProcessedUploads();
+      setFilesLoading(false);
+      return false;
+    }
+
+    const filesWithProcessedUploads = new Map(existingFiles);
+    for (const { extendedFile } of processedUploads) {
+      filesWithProcessedUploads.set(extendedFile.file_id, extendedFile);
+      if (tracksReservations) {
+        uploadScope.recent.set(extendedFile.file_id, extendedFile);
+      }
+    }
+    filesRef.current = filesWithProcessedUploads;
+
+    for (const { extendedFile, preview, resizeDetails } of processedUploads) {
+      if (resizeDetails) {
+        const { originalSize, newSize, compressionRatio } = resizeDetails;
+        showToast({
+          message: localize('com_info_image_resized', {
+            0: (originalSize / (1024 * 1024)).toFixed(1),
+            1: (newSize / (1024 * 1024)).toFixed(1),
+            2: Math.round((1 - compressionRatio) * 100),
+          }),
+          status: 'success',
+          duration: 3000,
+        });
+      }
+
+      if (extendedFile.file?.type.startsWith('image/') === true) {
+        loadImage(extendedFile, preview, uploadLifecycle);
+        continue;
+      }
+
+      await startUpload(extendedFile, uploadLifecycle);
+    }
+
+    return processedUploads.length > 0;
+  };
+
+  const handleFiles = async (
+    _files: FileList | File[],
+    _toolResource?: string,
+    uploadLifecycle?: UploadLifecycleCallbacks,
+  ): Promise<boolean> => {
+    /** `FileList` is live: copy it before yielding, as callers reset the input synchronously */
+    const fileList = Array.from(_files);
+    const assignedFileId = uploadLifecycle?.fileId;
+    if (assignedFileId) {
+      uploadErrorCallbacks.set(assignedFileId, uploadLifecycle);
+    }
+    /** Started before queueing so every waiting batch shares one bounded config window */
+    const configReady = isConfigPending ? waitForConfig() : undefined;
+    const previousProcessing = uploadScope.queue;
+    let releaseProcessing: () => void = () => undefined;
+    uploadScope.queue = new Promise<void>((resolve) => {
+      releaseProcessing = resolve;
+    });
+
+    try {
+      await previousProcessing;
+      await configReady;
+      if (uploadLifecycle?.shouldCommit?.() === false) {
+        if (assignedFileId) {
+          takeUploadRecovery(assignedFileId);
+        }
+        setFilesLoading(false);
+        return false;
+      }
+      const accepted = await processFiles(fileList, _toolResource, uploadLifecycle);
+      if (!accepted && assignedFileId) {
+        takeUploadRecovery(assignedFileId);
+      }
+      return accepted;
+    } catch (error) {
+      if (assignedFileId) {
+        takeUploadRecovery(assignedFileId);
+      }
+      throw error;
+    } finally {
+      releaseProcessing();
     }
   };
 
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>, _toolResource?: string) => {
     event.stopPropagation();
     if (event.target.files) {
       setFilesLoading(true);
-      handleFiles(event.target.files);
+      handleFiles(event.target.files, _toolResource);
       // reset the input
       event.target.value = '';
     }
   };
 
-  const abortUpload = () => {
+  const abortUpload = (fileId?: string) => {
     if (abortControllerRef.current) {
       logger.log('files', 'Aborting upload');
       abortControllerRef.current.abort('User aborted upload');
       abortControllerRef.current = null;
     }
+    if (fileId) {
+      clearUploadRecovery(fileId);
+      return;
+    }
+    for (const uploadId of Array.from(uploadErrorCallbacks.keys())) {
+      clearUploadRecovery(uploadId);
+    }
   };
 
   return {
     handleFileChange,
-    setToolResource,
     handleFiles,
     abortUpload,
     setFiles,
     files,
   };
+};
+
+export const useFileHandlingNoChatContext = (
+  params: UseFileHandling | undefined,
+  fileState: FileHandlingState,
+) => useFileHandlingCore(params, fileState);
+
+const useFileHandling = (params?: UseFileHandling) => {
+  const { files, setFiles, setFilesLoading, conversation } = useChatContext();
+
+  return useFileHandlingCore(params, {
+    files,
+    setFiles,
+    conversation,
+    setFilesLoading,
+  });
 };
 
 export default useFileHandling;

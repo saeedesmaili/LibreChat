@@ -1,18 +1,36 @@
 const path = require('path');
 const fs = require('fs').promises;
 const express = require('express');
-const { isAgentsEndpoint } = require('librechat-data-provider');
+const { logger } = require('@librechat/data-schemas');
 const {
-  filterFile,
-  processImageFile,
+  shouldUseUploadSse,
+  startUploadSseStream,
+  resolveUploadErrorMessage,
+  verifyAgentUploadPermission,
+} = require('@librechat/api');
+const { isAssistantsEndpoint } = require('librechat-data-provider');
+const {
   processAgentFileUpload,
+  processImageFile,
+  filterFile,
 } = require('~/server/services/Files/process');
-const { logger } = require('~/config');
+const { checkPermission } = require('~/server/services/PermissionService');
+const db = require('~/models');
 
 const router = express.Router();
 
 router.post('/', async (req, res) => {
   const metadata = req.body;
+  const appConfig = req.config;
+
+  /** Opened only once auth/validation has passed, right before the potentially
+   * long-running upload processing begins — see `startUploadSseStream`. */
+  let sseStream = null;
+  const openSseStreamIfRequested = () => {
+    if (shouldUseUploadSse(req)) {
+      sseStream = startUploadSseStream(res);
+    }
+  };
 
   try {
     filterFile({ req, image: true });
@@ -20,17 +38,32 @@ router.post('/', async (req, res) => {
     metadata.temp_file_id = metadata.file_id;
     metadata.file_id = req.file_id;
 
-    if (isAgentsEndpoint(metadata.endpoint) && metadata.tool_resource != null) {
-      return await processAgentFileUpload({ req, res, metadata });
+    if (!isAssistantsEndpoint(metadata.endpoint) && metadata.tool_resource != null) {
+      const denied = await verifyAgentUploadPermission({
+        req,
+        res,
+        metadata,
+        getAgent: db.getAgent,
+        checkPermission,
+      });
+      if (denied) {
+        return;
+      }
+      openSseStreamIfRequested();
+      return await processAgentFileUpload({ req, res, metadata, sseStream });
     }
 
-    await processImageFile({ req, res, metadata });
+    openSseStreamIfRequested();
+    await processImageFile({ req, res, metadata, sseStream });
   } catch (error) {
     // TODO: delete remote file if it exists
     logger.error('[/files/images] Error processing file:', error);
+
+    const message = resolveUploadErrorMessage(error);
+
     try {
       const filepath = path.join(
-        req.app.locals.paths.imageOutput,
+        appConfig.paths.imageOutput,
         req.user.id,
         path.basename(req.file.filename),
       );
@@ -38,13 +71,26 @@ router.post('/', async (req, res) => {
     } catch (error) {
       logger.error('[/files/images] Error deleting file:', error);
     }
-    res.status(500).json({ message: 'Error processing file' });
+    if (sseStream) {
+      sseStream.sendError({
+        message,
+        code: 500,
+        temp_file_id: metadata.temp_file_id,
+        tool_resource: metadata.tool_resource,
+        display_to_user: true,
+      });
+    } else {
+      res.status(500).json({ message });
+    }
   } finally {
     try {
       await fs.unlink(req.file.path);
       logger.debug('[/files/images] Temp. image upload file deleted');
-    } catch (error) {
+    } catch {
       logger.debug('[/files/images] Temp. image upload file already deleted');
+    }
+    if (sseStream) {
+      sseStream.close();
     }
   }
 });

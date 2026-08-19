@@ -1,11 +1,22 @@
 import { useEffect } from 'react';
+import { useToastContext } from '@librechat/client';
 import { EToolResources } from 'librechat-data-provider';
 import type { ExtendedFile } from '~/common';
 import { useDeleteFilesMutation } from '~/data-provider';
+import { logger, getCachedPreview } from '~/utils';
 import { useFileDeletion } from '~/hooks/Files';
 import FileContainer from './FileContainer';
-import { logger } from '~/utils';
+import { useLocalize } from '~/hooks';
 import Image from './Image';
+
+/**
+ * Shared wrapper with a stable module-scope identity. Passing an inline arrow as
+ * `Wrapper` makes it a new component type on every render, so React remounts the
+ * whole row and any focused control inside it loses focus.
+ */
+export const FileRowWrapper = ({ children }: { children: React.ReactNode }) => (
+  <div className="flex flex-wrap gap-2">{children}</div>
+);
 
 export default function FileRow({
   files: _files,
@@ -20,9 +31,9 @@ export default function FileRow({
   Wrapper,
 }: {
   files: Map<string, ExtendedFile> | undefined;
-  abortUpload?: () => void;
+  abortUpload?: (fileId?: string) => void;
   setFiles: React.Dispatch<React.SetStateAction<Map<string, ExtendedFile>>>;
-  setFilesLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  setFilesLoading?: React.Dispatch<React.SetStateAction<boolean>>;
   fileFilter?: (file: ExtendedFile) => boolean;
   assistant_id?: string;
   agent_id?: string;
@@ -30,6 +41,8 @@ export default function FileRow({
   isRTL?: boolean;
   Wrapper?: React.FC<{ children: React.ReactNode }>;
 }) {
+  const localize = useLocalize();
+  const { showToast } = useToastContext();
   const files = Array.from(_files?.values() ?? []).filter((file) =>
     fileFilter ? fileFilter(file) : true,
   );
@@ -54,11 +67,14 @@ export default function FileRow({
   const { deleteFile } = useFileDeletion({ mutateAsync, agent_id, assistant_id, tool_resource });
 
   useEffect(() => {
+    if (!setFilesLoading) return;
     if (files.length === 0) {
+      setFilesLoading(false);
       return;
     }
 
     if (files.some((file) => file.progress < 1)) {
+      setFilesLoading(true);
       return;
     }
 
@@ -73,8 +89,22 @@ export default function FileRow({
   }
 
   const renderFiles = () => {
-    // Inline style for RTL
-    const rowStyle = isRTL ? { display: 'flex', flexDirection: 'row-reverse' } : {};
+    const rowStyle = isRTL
+      ? {
+          display: 'flex',
+          flexDirection: 'row-reverse',
+          flexWrap: 'wrap',
+          gap: '4px',
+          width: '100%',
+          maxWidth: '100%',
+        }
+      : {
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '4px',
+          width: '100%',
+          maxWidth: '100%',
+        };
 
     return (
       <div style={rowStyle as React.CSSProperties}>
@@ -92,23 +122,39 @@ export default function FileRow({
           .uniqueFiles.map((file: ExtendedFile, index: number) => {
             const handleDelete = () => {
               if (abortUpload && file.progress < 1) {
-                abortUpload();
+                abortUpload(file.file_id);
+              }
+              if (file.progress >= 1 && !file.attached) {
+                showToast({
+                  message: localize('com_ui_deleting_file'),
+                  status: 'info',
+                });
               }
               deleteFile({ file, setFiles });
             };
             const isImage = file.type?.startsWith('image') ?? false;
-            if (isImage) {
-              return (
-                <Image
-                  key={index}
-                  url={file.preview ?? file.filepath}
-                  onDelete={handleDelete}
-                  progress={file.progress}
-                  source={file.source}
-                />
-              );
-            }
-            return <FileContainer key={index} file={file} onDelete={handleDelete} />;
+
+            return (
+              <div
+                key={index}
+                style={{
+                  flexBasis: '70px',
+                  flexGrow: 0,
+                  flexShrink: 0,
+                }}
+              >
+                {isImage ? (
+                  <Image
+                    url={getCachedPreview(file.file_id) ?? file.preview ?? file.filepath}
+                    onDelete={handleDelete}
+                    progress={file.progress}
+                    source={file.source}
+                  />
+                ) : (
+                  <FileContainer file={file} onDelete={handleDelete} />
+                )}
+              </div>
+            );
           })}
       </div>
     );

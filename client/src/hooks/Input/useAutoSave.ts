@@ -1,74 +1,98 @@
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import debounce from 'lodash/debounce';
+import { Constants } from 'librechat-data-provider';
 import { SetterOrUpdater, useRecoilValue } from 'recoil';
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { LocalStorageKeys, TFile } from 'librechat-data-provider';
+import type { TFile } from 'librechat-data-provider';
+import type { PendingTextAttachmentDraft } from '~/utils';
 import type { ExtendedFile } from '~/common';
+import {
+  applyPendingPastesToDraft,
+  clearDraft,
+  getDraft,
+  getFilesDraft,
+  getNewConversationDraftId,
+  getPendingDraftId,
+  isAskAnswerDraftId,
+  isNewConversationDraftId,
+  migrateFilesDraft,
+  migrateTextDraft,
+  setDraft,
+  setFilesDraft,
+} from '~/utils';
+import { hasInFlightUpload } from '~/hooks/Files/useFileHandling';
 import { useChatFormContext } from '~/Providers';
 import { useGetFiles } from '~/data-provider';
 import store from '~/store';
 
 export const useAutoSave = ({
-  conversationId,
+  index = 0,
+  isSubmitting,
+  conversationId: _conversationId,
+  draftId,
   textAreaRef,
-  files,
   setFiles,
+  files,
 }: {
+  index?: number;
+  isSubmitting?: boolean;
   conversationId?: string | null;
-  textAreaRef: React.RefObject<HTMLTextAreaElement>;
+  /** Explicit draft-key override: wins over the conversation id AND the
+   *  PENDING_CONVO redirect. Set while an `ask_user_question` pause turns the
+   *  composer into the answer box: the answer phase drafts under its own key,
+   *  and the key change itself drives the save/restore swap below, so the
+   *  conversation draft is stashed on entry and restored when the question
+   *  resolves. */
+  draftId?: string | null;
+  textAreaRef?: React.RefObject<HTMLTextAreaElement>;
   files: Map<string, ExtendedFile>;
   setFiles: SetterOrUpdater<Map<string, ExtendedFile>>;
 }) => {
   // setting for auto-save
   const { setValue } = useChatFormContext();
   const saveDrafts = useRecoilValue<boolean>(store.saveDrafts);
+  const pendingDraftId = getPendingDraftId(index);
+  const conversationDraftId =
+    _conversationId === Constants.NEW_CONVO ? getNewConversationDraftId(index) : _conversationId;
+  const conversationId = draftId ?? (isSubmitting ? pendingDraftId : conversationDraftId);
 
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const fileIds = useMemo(() => Array.from(files.keys()), [files]);
   const { data: fileList } = useGetFiles<TFile[]>();
-
-  const encodeBase64 = (plainText: string): string => {
-    try {
-      const textBytes = new TextEncoder().encode(plainText);
-      return btoa(String.fromCharCode(...textBytes));
-    } catch (e) {
-      return '';
-    }
-  };
-
-  const decodeBase64 = (base64String: string): string => {
-    try {
-      const bytes = atob(base64String);
-      const uint8Array = new Uint8Array(bytes.length);
-      for (let i = 0; i < bytes.length; i++) {
-        uint8Array[i] = bytes.charCodeAt(i);
-      }
-      return new TextDecoder().decode(uint8Array);
-    } catch (e) {
-      return '';
-    }
-  };
+  const filesRef = useRef(files);
+  filesRef.current = files;
 
   const restoreFiles = useCallback(
-    (id: string) => {
-      const filesDraft = JSON.parse(
-        localStorage.getItem(`${LocalStorageKeys.FILES_DRAFT}${id}`) || '[]',
-      ) as string[];
+    (id: string): PendingTextAttachmentDraft[] => {
+      const filesDraft = getFilesDraft(id);
 
-      if (filesDraft.length === 0) {
+      if (filesDraft.fileIds.length === 0) {
         setFiles(new Map());
-        return;
+        return [];
       }
+      if (fileList == null) {
+        return [];
+      }
+
+      const activeFileIds = new Set(filesRef.current.keys());
+      const fileIdsToKeep: string[] = [];
+      const pendingPastes = { ...filesDraft.pendingPastes };
+      const pastesToRecover: PendingTextAttachmentDraft[] = [];
 
       // Retrieve files stored in localStorage from files in fileList and set them to `setFiles`
       // If a file is found with `temp_file_id`, use `temp_file_id` as a key in `setFiles`
-      filesDraft.forEach((fileId) => {
+      filesDraft.fileIds.forEach((fileId) => {
         const fileData = fileList?.find((f) => f.file_id === fileId);
         const tempFileData = fileList?.find((f) => f.temp_file_id === fileId);
         const { fileToRecover, fileIdToRecover } = fileData
           ? { fileToRecover: fileData, fileIdToRecover: fileId }
-          : { fileToRecover: tempFileData, fileIdToRecover: tempFileData?.temp_file_id || fileId };
+          : {
+              fileToRecover: tempFileData,
+              fileIdToRecover: (tempFileData?.temp_file_id ?? '') || fileId,
+            };
 
         if (fileToRecover) {
+          fileIdsToKeep.push(fileId);
+          delete pendingPastes[fileId];
           setFiles((currentFiles) => {
             const updatedFiles = new Map(currentFiles);
             updatedFiles.set(fileIdToRecover, {
@@ -79,16 +103,33 @@ export const useAutoSave = ({
             });
             return updatedFiles;
           });
+          return;
         }
+
+        const pendingPaste = pendingPastes[fileId];
+        if (pendingPaste && !activeFileIds.has(fileId) && !hasInFlightUpload(fileId)) {
+          pastesToRecover.push(pendingPaste);
+          delete pendingPastes[fileId];
+          return;
+        }
+
+        fileIdsToKeep.push(fileId);
       });
+
+      setFilesDraft(id, { fileIds: fileIdsToKeep, pendingPastes });
+      return pastesToRecover;
     },
     [fileList, setFiles],
   );
 
   const restoreText = useCallback(
-    (id: string) => {
-      const savedDraft = localStorage.getItem(`${LocalStorageKeys.TEXT_DRAFT}${id}`) || '';
-      setValue('text', decodeBase64(savedDraft));
+    (id: string, pendingPastes: PendingTextAttachmentDraft[] = []) => {
+      const draftText = applyPendingPastesToDraft(getDraft(id) ?? '', pendingPastes);
+
+      if (pendingPastes.length > 0) {
+        setDraft({ id, value: draftText });
+      }
+      setValue('text', draftText);
     },
     [setValue],
   );
@@ -99,13 +140,10 @@ export const useAutoSave = ({
         return;
       }
       // Save the draft of the current conversation before switching
-      if (textAreaRef.current.value === '') {
-        localStorage.removeItem(`${LocalStorageKeys.TEXT_DRAFT}${id}`);
+      if (textAreaRef.current.value === '' || textAreaRef.current.value.length === 1) {
+        clearDraft(id);
       } else {
-        localStorage.setItem(
-          `${LocalStorageKeys.TEXT_DRAFT}${id}`,
-          encodeBase64(textAreaRef.current.value),
-        );
+        setDraft({ id, value: textAreaRef.current.value });
       }
     },
     [textAreaRef],
@@ -115,33 +153,55 @@ export const useAutoSave = ({
     // This useEffect is responsible for setting up and cleaning up the auto-save functionality
     // for the text area input. It saves the text to localStorage with a debounce to prevent
     // excessive writes.
-    if (!saveDrafts || !conversationId) {
+    if (!saveDrafts || conversationId == null || conversationId === '') {
       return;
     }
 
-    const handleInput = debounce(() => {
-      if (textAreaRef.current && textAreaRef.current.value) {
-        localStorage.setItem(
-          `${LocalStorageKeys.TEXT_DRAFT}${conversationId}`,
-          encodeBase64(textAreaRef.current.value),
-        );
-      } else {
-        localStorage.removeItem(`${LocalStorageKeys.TEXT_DRAFT}${conversationId}`);
-      }
-    }, 1000);
+    /** Saves the composer's value AT FLUSH TIME rather than the value captured
+     *  when the event fired. A during-run steer/queue consumes the text and
+     *  clears the composer programmatically, so a write still in flight would
+     *  otherwise land after the submit and restore the just-sent text. */
+    const saveLatest = () =>
+      setDraft({ id: conversationId, value: textAreaRef?.current?.value ?? '' });
 
-    const textArea = textAreaRef.current;
+    /** Use shorter debounce for saving text (25ms) to capture rapid typing */
+    const handleInputFast = debounce(saveLatest, 25);
+
+    /** Use longer debounce for clearing empty values (850ms) to prevent accidental draft loss */
+    const handleInputSlow = debounce(saveLatest, 850);
+
+    const eventListener = (e: Event) => {
+      const target = e.target as HTMLTextAreaElement;
+      const value = target.value;
+
+      /** Cancel any pending operations to avoid conflicts */
+      handleInputFast.cancel();
+      handleInputSlow.cancel();
+
+      /** If empty, use long delay to prevent accidental clearing
+       * Otherwise use short delay to capture rapid typing */
+      if (value === '') {
+        handleInputSlow();
+      } else {
+        handleInputFast();
+      }
+    };
+
+    const textArea = textAreaRef?.current;
     if (textArea) {
-      textArea.addEventListener('input', handleInput);
+      textArea.addEventListener('input', eventListener);
     }
 
     return () => {
       if (textArea) {
-        textArea.removeEventListener('input', handleInput);
+        textArea.removeEventListener('input', eventListener);
       }
-      handleInput.cancel();
+      handleInputFast.cancel();
+      handleInputSlow.cancel();
     };
   }, [conversationId, saveDrafts, textAreaRef]);
+
+  const prevConversationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     // This useEffect is responsible for saving the current conversation's draft and
@@ -149,7 +209,7 @@ export const useAutoSave = ({
     // It handles both text and file drafts, ensuring that the user's input is preserved
     // across different conversations.
 
-    if (!saveDrafts || !conversationId) {
+    if (!saveDrafts || conversationId == null || conversationId === '') {
       return;
     }
     if (conversationId === currentConversationId) {
@@ -159,22 +219,46 @@ export const useAutoSave = ({
     // clear attachment files when switching conversation
     setFiles(new Map());
 
+    /** The key the attachments live under once the pending draft has been moved. A move that
+     * storage refuses leaves them behind, and recovery has to read them where they still are. */
+    let filesDraftId = conversationId;
+
     try {
-      if (currentConversationId) {
+      // Check for transition from PENDING_CONVO to a valid conversationId.
+      // An ask-answer key is excluded: it is a temporary overlay, not the
+      // pending draft's destination — migrating would delete the very draft
+      // the answer-phase swap-back is supposed to restore.
+      if (
+        prevConversationIdRef.current === pendingDraftId &&
+        conversationId !== pendingDraftId &&
+        !isAskAnswerDraftId(conversationId) &&
+        !isNewConversationDraftId(conversationId) &&
+        conversationId.length > 3
+      ) {
+        // Move the pending text draft to the new conversationId, falling back to the current
+        // text area value when there was no pending draft to carry over
+        if (!migrateTextDraft(pendingDraftId, conversationId) && textAreaRef?.current?.value) {
+          setDraft({ id: conversationId, value: textAreaRef.current.value });
+        }
+        filesDraftId = migrateFilesDraft(pendingDraftId, conversationId);
+      } else if (currentConversationId != null && currentConversationId) {
         saveText(currentConversationId);
       }
 
-      restoreText(conversationId);
-      restoreFiles(conversationId);
+      const pendingPastes = restoreFiles(filesDraftId);
+      restoreText(conversationId, pendingPastes);
     } catch (e) {
       console.error(e);
     }
 
+    prevConversationIdRef.current = conversationId;
     setCurrentConversationId(conversationId);
   }, [
-    conversationId,
     currentConversationId,
+    conversationId,
+    pendingDraftId,
     restoreFiles,
+    textAreaRef,
     restoreText,
     saveDrafts,
     saveText,
@@ -182,31 +266,46 @@ export const useAutoSave = ({
   ]);
 
   useEffect(() => {
+    if (
+      !saveDrafts ||
+      conversationId == null ||
+      conversationId === '' ||
+      currentConversationId !== conversationId ||
+      fileList == null
+    ) {
+      return;
+    }
+
+    const pendingPastes = restoreFiles(conversationId);
+    if (pendingPastes.length > 0) {
+      restoreText(conversationId, pendingPastes);
+    }
+  }, [conversationId, currentConversationId, fileList, restoreFiles, restoreText, saveDrafts]);
+
+  useEffect(() => {
     // This useEffect is responsible for saving or removing the current conversation's file drafts
     // in localStorage whenever the file attachments change.
     // It ensures that the file drafts are kept up-to-date and can be restored
     // when the conversation is revisited.
 
-    if (!saveDrafts || !conversationId || currentConversationId !== conversationId) {
+    if (
+      !saveDrafts ||
+      conversationId == null ||
+      conversationId === '' ||
+      currentConversationId !== conversationId
+    ) {
       return;
     }
 
-    if (fileIds.length === 0) {
-      localStorage.removeItem(`${LocalStorageKeys.FILES_DRAFT}${conversationId}`);
-    } else {
-      localStorage.setItem(
-        `${LocalStorageKeys.FILES_DRAFT}${conversationId}`,
-        JSON.stringify(fileIds),
-      );
-    }
-  }, [files, conversationId, saveDrafts, currentConversationId, fileIds]);
-
-  const clearDraft = useCallback(() => {
-    if (conversationId) {
-      localStorage.removeItem(`${LocalStorageKeys.TEXT_DRAFT}${conversationId}`);
-      localStorage.removeItem(`${LocalStorageKeys.FILES_DRAFT}${conversationId}`);
-    }
-  }, [conversationId]);
-
-  return { clearDraft };
+    const existingDraft = getFilesDraft(conversationId);
+    const pendingFileIds = Object.keys(existingDraft.pendingPastes);
+    const draftFileIds = [
+      ...fileIds,
+      ...pendingFileIds.filter((fileId) => !fileIds.includes(fileId)),
+    ];
+    setFilesDraft(conversationId, {
+      fileIds: draftFileIds,
+      pendingPastes: existingDraft.pendingPastes,
+    });
+  }, [conversationId, saveDrafts, currentConversationId, fileIds]);
 };

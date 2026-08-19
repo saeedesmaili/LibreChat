@@ -1,11 +1,24 @@
 import { RefObject } from 'react';
-import { FileSources } from 'librechat-data-provider';
-import type * as InputNumberPrimitive from 'rc-input-number';
-import type { ColumnDef } from '@tanstack/react-table';
-import type { SetterOrUpdater } from 'recoil';
-import type * as t from 'librechat-data-provider';
+import { FileSources, EModelEndpoint, isEphemeralAgentId } from 'librechat-data-provider';
 import type { UseMutationResult } from '@tanstack/react-query';
+import type * as InputNumberPrimitive from 'rc-input-number';
+import type { SetterOrUpdater, RecoilState } from 'recoil';
+import type { ColumnDef } from '@tanstack/react-table';
+import type * as t from 'librechat-data-provider';
 import type { LucideIcon } from 'lucide-react';
+import type { TranslationKeys } from '~/hooks';
+import { MCPServerDefinition } from '~/hooks/MCP/useMCPServerManager';
+
+export function isEphemeralAgent(agentId: string | null | undefined): boolean {
+  return isEphemeralAgentId(agentId);
+}
+
+export interface ConfigFieldDetail {
+  title: string;
+  description: string;
+  /** Whether the field holds a secret and should be masked (defaults to masked when omitted). */
+  sensitive?: boolean;
+}
 
 export type CodeBarProps = {
   lang: string;
@@ -28,7 +41,6 @@ export enum STTEndpoints {
 
 export enum TTSEndpoints {
   browser = 'browser',
-  edge = 'edge',
   external = 'external',
 }
 
@@ -45,6 +57,14 @@ export type AudioChunk = {
     chars_durations_ms: number[];
     chars: string[];
   };
+};
+
+export type BadgeItem = {
+  id: string;
+  icon: React.ComponentType<any>;
+  label: string;
+  atom: RecoilState<boolean>;
+  isAvailable: boolean;
 };
 
 export type AssistantListItem = {
@@ -66,7 +86,10 @@ export type GenericSetter<T> = (value: T | ((currentValue: T) => T)) => void;
 
 export type LastSelectedModels = Record<t.EModelEndpoint, string>;
 
-export type LocalizeFunction = (phraseKey: string, ...values: string[]) => string;
+export type LocalizeFunction = (
+  phraseKey: TranslationKeys,
+  options?: Record<string, string | number>,
+) => string;
 
 export type ChatFormValues = { text: string };
 
@@ -85,16 +108,24 @@ export type IconMapProps = {
   iconURL?: string;
   context?: 'landing' | 'menu-item' | 'nav' | 'message';
   endpoint?: string | null;
+  endpointType?: string;
   assistantName?: string;
   agentName?: string;
   avatar?: string;
   size?: number;
 };
 
-export type AgentIconMapProps = IconMapProps & { agentName: string };
+export type IconComponent = React.ComponentType<IconMapProps>;
+export type AgentIconComponent = React.ComponentType<AgentIconMapProps>;
+export type IconComponentTypes = IconComponent | AgentIconComponent;
+export type IconsRecord = {
+  [key in t.EModelEndpoint | 'unknown' | string]: IconComponentTypes | null | undefined;
+};
+
+export type AgentIconMapProps = IconMapProps & { agentName?: string };
 
 export type NavLink = {
-  title: string;
+  title: TranslationKeys;
   label?: string;
   icon: LucideIcon | React.FC;
   Component?: React.ComponentType;
@@ -102,13 +133,6 @@ export type NavLink = {
   variant?: 'default' | 'ghost';
   id: string;
 };
-
-export interface NavProps {
-  isCollapsed: boolean;
-  links: NavLink[];
-  resize?: (size: number) => void;
-  defaultActive?: string;
-}
 
 export interface DataColumnMeta {
   meta:
@@ -119,9 +143,11 @@ export interface DataColumnMeta {
 }
 
 export enum Panel {
+  advanced = 'advanced',
   builder = 'builder',
   actions = 'actions',
   model = 'model',
+  version = 'version',
 }
 
 export type FileSetter =
@@ -167,19 +193,60 @@ export type AgentPanelProps = {
   index?: number;
   agent_id?: string;
   activePanel?: string;
+  mcp?: t.MCP;
+  mcps?: t.MCP[];
   action?: t.Action;
   actions?: t.Action[];
+  createMutation: UseMutationResult<t.Agent, Error, t.AgentCreateParams>;
   setActivePanel: React.Dispatch<React.SetStateAction<Panel>>;
+  setMcp: React.Dispatch<React.SetStateAction<t.MCP | undefined>>;
   setAction: React.Dispatch<React.SetStateAction<t.Action | undefined>>;
   endpointsConfig?: t.TEndpointsConfig;
   setCurrentAgentId: React.Dispatch<React.SetStateAction<string | undefined>>;
+  agentsConfig?: t.TAgentsEndpoint | null;
+};
+
+export interface MCPServerInfo {
+  serverName: string;
+  tools: t.AgentToolType[];
+  isConfigured: boolean;
+  isConnected: boolean;
+  /** True when tools can only be discovered with live chat request fields. */
+  requestScoped?: boolean;
+  consumeOnly?: boolean;
+  metadata: t.TPlugin;
+}
+
+export type AgentPanelContextType = {
+  action?: t.Action;
+  actions?: t.Action[];
+  setAction: React.Dispatch<React.SetStateAction<t.Action | undefined>>;
+  mcp?: t.MCP;
+  mcps?: t.MCP[];
+  setMcp: React.Dispatch<React.SetStateAction<t.MCP | undefined>>;
+  setMcps: React.Dispatch<React.SetStateAction<t.MCP[] | undefined>>;
+  activePanel?: string;
+  regularTools?: t.TPlugin[];
+  setActivePanel: React.Dispatch<React.SetStateAction<Panel>>;
+  setCurrentAgentId: React.Dispatch<React.SetStateAction<string | undefined>>;
+  agent_id?: string;
+  startupConfig?: t.TStartupConfig | null;
+  agentsConfig?: t.TAgentsEndpoint | null;
+  endpointsConfig?: t.TEndpointsConfig | null;
+  /** Pre-computed MCP server information indexed by server key */
+  mcpServersMap: Map<string, MCPServerInfo>;
+  /** True while the MCP tools list is being fetched and no data has arrived yet,
+   * so consumers can show a skeleton instead of an empty "no tools" state. */
+  mcpToolsLoading: boolean;
+  availableMCPServers: MCPServerDefinition[];
+  availableMCPServersMap: t.MCPServersListResponse | undefined;
 };
 
 export type AgentModelPanelProps = {
-  setActivePanel: React.Dispatch<React.SetStateAction<Panel>>;
-  providers: Option[];
-  models: Record<string, string[]>;
   agent_id?: string;
+  providers: Option[];
+  models: Record<string, string[] | undefined>;
+  setActivePanel: React.Dispatch<React.SetStateAction<Panel>>;
 };
 
 export type AugmentedColumnDef<TData, TValue> = ColumnDef<TData, TValue> & DataColumnMeta;
@@ -250,10 +317,6 @@ export type TSetOptionsPayload = {
   setExample: TSetExample;
   addExample: () => void;
   removeExample: () => void;
-  setAgentOption: TSetOption;
-  // getConversation: () => t.TConversation | t.TPreset | null;
-  checkPluginSelection: (value: string) => boolean;
-  setTools: (newValue: string, remove?: boolean) => void;
   setOptions?: TSetOptions;
 };
 
@@ -278,19 +341,77 @@ export type TAskProps = {
   parentMessageId?: string | null;
   conversationId?: string | null;
   messageId?: string | null;
+  clientTimestamp?: string;
 };
 
 export type TOptions = {
   editedMessageId?: string | null;
+  editedContent?: t.TEditedContent;
   editedText?: string | null;
-  resubmitFiles?: boolean;
   isRegenerate?: boolean;
   isContinued?: boolean;
   isEdited?: boolean;
   overrideMessages?: t.TMessage[];
+  /** This value is only true when the user submits a message with "Update & rerun" for a user-created message */
+  isResubmission?: boolean;
+  /** Currently only utilized when `isResubmission === true`, uses that message's currently attached files */
+  overrideFiles?: t.TMessage['files'];
+  /**
+   * Assistant message being regenerated. Used to derive the optimistic response
+   * id for non-tail regenerations without accidentally keying the stream to the
+   * conversation tail.
+   */
+  targetResponseMessageId?: string | null;
+  /**
+   * Carry forward a user message's manually-invoked skills when the caller
+   * is resubmitting / regenerating that same message — the compose-time
+   * atom has already been drained on the original submit, so without this
+   * the second turn would run without any manual priming even though the
+   * pills are still visible on the user bubble.
+   */
+  overrideManualSkills?: string[];
+  /**
+   * Carry forward a user message's quoted excerpts when resubmitting /
+   * regenerating that same message — the compose-time atom is drained on the
+   * original submit, so without this the second turn would lose the quoted
+   * context even though the references still show on the user bubble.
+   */
+  overrideQuotes?: string[];
+  /** Added conversation for multi-convo feature - sent to server as part of submission payload */
+  addedConvo?: t.TConversation;
+  /** Reuse a durable submission identity (terminal steer recovery). */
+  overrideClientRequestId?: string;
+  /** Exact parked steer source for a recovery attempt. */
+  overrideRecoverySteerId?: string;
+  /** Exact terminal generation observed before an automatic queued start. */
+  overrideExpectedPredecessorCreatedAt?: number;
+  /** Client-only exact queue position restored if admission is rejected. */
+  overrideQueuedMessageOrigin?: unknown;
 };
 
-export type TAskFunction = (props: TAskProps, options?: TOptions) => void;
+export type TAskFunction = (props: TAskProps, options?: TOptions) => false | void;
+
+/**
+ * Stable context object passed from non-memo'd wrapper components (Message, MessageContent)
+ * to memo'd inner components (MessageRender, ContentRender) via props.
+ *
+ * This avoids subscribing to ChatContext inside memo'd components, which would bypass React.memo
+ * and cause unnecessary re-renders when `isSubmitting` changes during streaming.
+ *
+ * The `isSubmitting` property should use a getter backed by a ref so it returns the current
+ * value at call-time (for callback guards) without being a reactive dependency.
+ */
+export type TMessageChatContext = {
+  ask: TAskFunction;
+  index: number;
+  regenerate: (message: t.TMessage, options?: { addedConvo?: t.TConversation | null }) => void;
+  conversation: t.TConversation | null;
+  latestMessageId: string | undefined;
+  latestMessageDepth: number | undefined;
+  handleContinue: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  /** Should be a getter backed by a ref — reads current value without triggering re-renders */
+  readonly isSubmitting: boolean;
+};
 
 export type TMessageProps = {
   conversation?: t.TConversation | null;
@@ -304,6 +425,12 @@ export type TMessageProps = {
   setCurrentEditId?: React.Dispatch<React.SetStateAction<string | number | null>> | null;
   setSiblingIdx?: ((value: number) => void | React.Dispatch<React.SetStateAction<number>>) | null;
 };
+
+export type TMessageIcon = { endpoint?: string | null; isCreatedByUser?: boolean } & Pick<
+  t.TConversation,
+  'modelLabel'
+> &
+  Pick<t.TMessage, 'model' | 'iconURL'>;
 
 export type TInitialProps = {
   text: string;
@@ -350,12 +477,12 @@ export type TDangerButtonProps = {
   showText?: boolean;
   mutation?: UseMutationResult<unknown>;
   onClick: () => void;
-  infoTextCode: string;
-  actionTextCode: string;
+  infoTextCode: TranslationKeys;
+  actionTextCode: TranslationKeys;
   dataTestIdInitial: string;
   dataTestIdConfirm: string;
-  infoDescriptionCode?: string;
-  confirmActionTextCode?: string;
+  infoDescriptionCode?: TranslationKeys;
+  confirmActionTextCode?: TranslationKeys;
 };
 
 export type TDialogProps = {
@@ -363,7 +490,7 @@ export type TDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-export type TPluginStoreDialogProps = {
+export type ToolDialogProps = {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
 };
@@ -379,7 +506,7 @@ export type TAuthContext = {
   isAuthenticated: boolean;
   error: string | undefined;
   login: (data: t.TLoginUser) => void;
-  logout: () => void;
+  logout: (redirect?: string) => void;
   setError: React.Dispatch<React.SetStateAction<string | undefined>>;
   roles?: Record<string, t.TRole | null | undefined>;
 };
@@ -397,7 +524,7 @@ export type TAuthConfig = {
 };
 
 export type IconProps = Pick<t.TMessage, 'isCreatedByUser' | 'model'> &
-  Pick<t.TConversation, 'chatGptLabel' | 'modelLabel' | 'jailbreak'> & {
+  Pick<t.TConversation, 'chatGptLabel' | 'modelLabel'> & {
     size?: number;
     button?: boolean;
     iconURL?: string;
@@ -424,11 +551,20 @@ export type VoiceOption = {
 };
 
 export type TMessageAudio = {
-  messageId?: string;
-  content?: t.TMessageContentParts[] | string;
-  className?: string;
-  isLast: boolean;
+  isLast?: boolean;
   index: number;
+  messageId: string;
+  content: string;
+  className?: string;
+  renderButton?: (props: {
+    onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
+    title: string;
+    icon: React.ReactNode;
+    isActive?: boolean;
+    isVisible?: boolean;
+    isDisabled?: boolean;
+    className?: string;
+  }) => React.ReactNode;
 };
 
 export type OptionWithIcon = Option & { icon?: React.ReactNode };
@@ -462,9 +598,19 @@ export interface ExtendedFile {
   source?: FileSources;
   attached?: boolean;
   embedded?: boolean;
+  tool_resource?: string;
+  metadata?: t.TFile['metadata'];
 }
 
-export type ContextType = { navVisible: boolean; setNavVisible: (visible: boolean) => void };
+export interface ModelItemProps {
+  modelName: string;
+  endpoint: EModelEndpoint;
+  isSelected: boolean;
+  onSelect: () => void;
+  onNavigateBack: () => void;
+  icon?: JSX.Element;
+  className?: string;
+}
 
 export interface SwitcherProps {
   endpoint?: t.EModelEndpoint | null;
@@ -486,14 +632,13 @@ export type NewConversationParams = {
   preset?: Partial<t.TPreset>;
   modelsData?: t.TModelsConfig;
   buildDefault?: boolean;
-  keepLatestMessage?: boolean;
   keepAddedConvos?: boolean;
+  disableParams?: boolean;
 };
 
 export type ConvoGenerator = (params: NewConversationParams) => void | t.TConversation;
 
 export type TBaseResData = {
-  plugin?: t.TResPlugin;
   final?: boolean;
   initial?: boolean;
   previousMessages?: t.TMessage[];
@@ -507,7 +652,8 @@ export type TResData = TBaseResData & {
   responseMessage: t.TMessage;
 };
 
-export type TFinalResData = TBaseResData & {
+export type TFinalResData = Omit<TBaseResData, 'conversation'> & {
+  conversation: Partial<t.TConversation> & Pick<t.TConversation, 'conversationId'>;
   requestMessage?: t.TMessage;
   responseMessage?: t.TMessage;
 };
@@ -532,5 +678,8 @@ export type TThread = { id: string; createdAt: string };
 declare global {
   interface Window {
     google_tag_manager?: unknown;
+    __LIBRECHAT_CONFIG__?: {
+      enableQueryDevtools?: boolean;
+    };
   }
 }

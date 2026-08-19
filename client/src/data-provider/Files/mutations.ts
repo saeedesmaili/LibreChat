@@ -1,3 +1,4 @@
+import { useToastContext } from '@librechat/client';
 import { EToolResources } from 'librechat-data-provider';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -7,8 +8,10 @@ import {
   defaultOrderQuery,
   isAssistantsEndpoint,
 } from 'librechat-data-provider';
-import type * as t from 'librechat-data-provider';
 import type { UseMutationResult } from '@tanstack/react-query';
+import type * as t from 'librechat-data-provider';
+import { useGetStartupConfig } from '../Endpoints';
+import { useLocalize } from '~/hooks';
 
 export const useUploadFileMutation = (
   _options?: t.UploadMutationOptions,
@@ -19,6 +22,8 @@ export const useUploadFileMutation = (
   FormData, // request
   unknown // context
 > => {
+  const { data: startupConfig } = useGetStartupConfig();
+  const sseEnabled = startupConfig?.fileUploadSseEnabled === true;
   const queryClient = useQueryClient();
   const { onSuccess, ...options } = _options || {};
   return useMutation([MutationKeys.fileUpload], {
@@ -28,14 +33,14 @@ export const useUploadFileMutation = (
       const version = body.get('version') ?? '';
       const endpoint = (body.get('endpoint') ?? '') as string;
       if (isAssistantsEndpoint(endpoint) && version === '2') {
-        return dataService.uploadFile(body, signal);
+        return dataService.uploadFile(body, signal, sseEnabled);
       }
 
       if (width !== '' && height !== '') {
-        return dataService.uploadImage(body, signal);
+        return dataService.uploadImage(body, signal, sseEnabled);
       }
 
-      return dataService.uploadFile(body, signal);
+      return dataService.uploadFile(body, signal, sseEnabled);
     },
     ...options,
     onSuccess: (data, formData, context) => {
@@ -63,8 +68,9 @@ export const useUploadFileMutation = (
 
           const update = {};
           const prevResources = agent.tool_resources ?? {};
-          const prevResource: t.ExecuteCodeResource | t.AgentFileSearchResource = agent
-            .tool_resources?.[tool_resource] ?? {
+          const prevResource: t.ExecuteCodeResource | t.AgentFileResource = agent.tool_resources?.[
+            tool_resource
+          ] ?? {
             file_ids: [],
           };
           if (!prevResource.file_ids) {
@@ -75,6 +81,9 @@ export const useUploadFileMutation = (
             ...prevResources,
             [tool_resource]: prevResource,
           };
+          if (!agent.tools?.includes(tool_resource)) {
+            update['tools'] = [...(agent.tools ?? []), tool_resource];
+          }
           return {
             ...agent,
             ...update,
@@ -132,6 +141,22 @@ export const useUploadFileMutation = (
   });
 };
 
+/**
+ * Owner-scoped usage touch for uploads entering the client-side queue, so the
+ * upload-window TTL cannot reap them while the message waits out a long run.
+ * Fire-and-forget: failures are tolerated (send-time marking is the backstop).
+ */
+export const useMarkFilesUsageMutation = (): UseMutationResult<
+  t.TFilesUsageResponse, // response data
+  unknown, // error
+  t.TFilesUsageBody, // request
+  unknown // context
+> => {
+  return useMutation([MutationKeys.fileUsage], {
+    mutationFn: (body: t.TFilesUsageBody) => dataService.markFilesUsage(body),
+  });
+};
+
 export const useDeleteFilesMutation = (
   _options?: t.DeleteMutationOptions,
 ): UseMutationResult<
@@ -141,10 +166,24 @@ export const useDeleteFilesMutation = (
   unknown // context
 > => {
   const queryClient = useQueryClient();
-  const { onSuccess, ...options } = _options || {};
+  const { showToast } = useToastContext();
+  const localize = useLocalize();
+  const { onSuccess, onError, ...options } = _options || {};
   return useMutation([MutationKeys.fileDelete], {
     mutationFn: (body: t.DeleteFilesBody) => dataService.deleteFiles(body),
     ...options,
+    onError: (error, vars, context) => {
+      if (error && typeof error === 'object' && 'response' in error) {
+        const errorWithResponse = error as { response?: { status?: number } };
+        if (errorWithResponse.response?.status === 403) {
+          showToast({
+            message: localize('com_ui_delete_not_allowed'),
+            status: 'error',
+          });
+        }
+      }
+      onError?.(error, vars, context);
+    },
     onSuccess: (data, vars, context) => {
       queryClient.setQueryData<t.TFile[] | undefined>([QueryKeys.files], (cachefiles) => {
         const { files: filesDeleted } = vars;
@@ -156,6 +195,12 @@ export const useDeleteFilesMutation = (
 
         return (cachefiles ?? []).filter((file) => !fileMap.has(file.file_id));
       });
+
+      showToast({
+        message: localize('com_ui_delete_success'),
+        status: 'success',
+      });
+
       onSuccess?.(data, vars, context);
       if (vars.agent_id != null && vars.agent_id) {
         queryClient.refetchQueries([QueryKeys.agent, vars.agent_id]);

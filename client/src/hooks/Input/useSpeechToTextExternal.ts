@@ -1,27 +1,59 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useRecoilState } from 'recoil';
+import { useToastContext } from '@librechat/client';
 import { useSpeechToTextMutation } from '~/data-provider';
-import { useToastContext } from '~/Providers';
 import store from '~/store';
-import useGetAudioSettings from './useGetAudioSettings';
 
-const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void) => {
+export const getBestSupportedMimeType = (
+  isTypeSupported: (type: string) => boolean = (type) =>
+    typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type),
+  userAgent: string = typeof navigator !== 'undefined' ? navigator.userAgent : '',
+) => {
+  const types = [
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+    'audio/wav',
+    'audio/webm',
+    'audio/webm;codecs=opus',
+    'audio/mp4',
+  ];
+
+  for (const type of types) {
+    if (isTypeSupported(type)) {
+      return type;
+    }
+  }
+
+  const ua = userAgent.toLowerCase();
+  if (ua.indexOf('safari') !== -1 && ua.indexOf('chrome') === -1) {
+    return 'audio/mp4';
+  } else if (ua.indexOf('firefox') !== -1) {
+    return 'audio/ogg';
+  }
+
+  return 'audio/webm';
+};
+
+const useSpeechToTextExternal = (
+  setText: (text: string) => void,
+  onTranscriptionComplete: (text: string) => void,
+) => {
   const { showToast } = useToastContext();
-  const { speechToTextEndpoint } = useGetAudioSettings();
-  const isExternalSTTEnabled = speechToTextEndpoint === 'external';
+  const audioStream = useRef<MediaStream | null>(null);
+  const animationFrameIdRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+
+  const audioChunksRef = useRef<Blob[]>([]);
+  const [isListening, setIsListening] = useState(false);
+  const [isRequestBeingMade, setIsRequestBeingMade] = useState(false);
+  const [audioMimeType, setAudioMimeType] = useState<string>(() => getBestSupportedMimeType());
+
+  const [minDecibels] = useRecoilState(store.decibelValue);
+  const [autoSendText] = useRecoilState(store.autoSendText);
+  const [languageSTT] = useRecoilState<string>(store.languageSTT);
   const [speechToText] = useRecoilState<boolean>(store.speechToText);
   const [autoTranscribeAudio] = useRecoilState<boolean>(store.autoTranscribeAudio);
-  const [autoSendText] = useRecoilState(store.autoSendText);
-  const [text, setText] = useState<string>('');
-  const [isListening, setIsListening] = useState(false);
-  const [permission, setPermission] = useState(false);
-  const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
-  const [isRequestBeingMade, setIsRequestBeingMade] = useState(false);
-  const [minDecibels] = useRecoilState(store.decibelValue);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioStream = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const animationFrameIdRef = useRef<number | null>(null);
 
   const { mutate: processAudio, isLoading: isProcessing } = useSpeechToTextMutation({
     onSuccess: (data) => {
@@ -44,18 +76,22 @@ const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void
     },
   });
 
-  const cleanup = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.removeEventListener('dataavailable', (event: BlobEvent) => {
-        audioChunks.push(event.data);
-      });
-      mediaRecorderRef.current.removeEventListener('stop', handleStop);
-      mediaRecorderRef.current = null;
+  const getFileExtension = (mimeType: string) => {
+    if (mimeType.includes('mp4')) {
+      return 'm4a';
+    } else if (mimeType.includes('ogg')) {
+      return 'ogg';
+    } else if (mimeType.includes('wav')) {
+      return 'wav';
+    } else {
+      return 'webm';
     }
   };
 
-  const clearText = () => {
-    setText('');
+  const cleanup = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current = null;
+    }
   };
 
   const getMicrophonePermission = async () => {
@@ -64,21 +100,24 @@ const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void
         audio: true,
         video: false,
       });
-      setPermission(true);
       audioStream.current = streamData ?? null;
-    } catch (err) {
-      setPermission(false);
+    } catch {
+      audioStream.current = null;
     }
   };
 
   const handleStop = () => {
-    if (audioChunks.length > 0) {
-      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+    if (audioChunksRef.current.length > 0) {
+      const audioBlob = new Blob(audioChunksRef.current, { type: audioMimeType });
+      const fileExtension = getFileExtension(audioMimeType);
 
-      setAudioChunks([]);
+      audioChunksRef.current = [];
 
       const formData = new FormData();
-      formData.append('audio', audioBlob, 'audio.wav');
+      formData.append('audio', audioBlob, `audio.${fileExtension}`);
+      if (languageSTT) {
+        formData.append('language', languageSTT);
+      }
       setIsRequestBeingMade(true);
       cleanup();
       processAudio(formData);
@@ -132,10 +171,15 @@ const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void
 
     if (audioStream.current) {
       try {
-        setAudioChunks([]);
-        mediaRecorderRef.current = new MediaRecorder(audioStream.current);
+        audioChunksRef.current = [];
+        const bestMimeType = getBestSupportedMimeType();
+        setAudioMimeType(bestMimeType);
+
+        mediaRecorderRef.current = new MediaRecorder(audioStream.current, {
+          mimeType: audioMimeType,
+        });
         mediaRecorderRef.current.addEventListener('dataavailable', (event: BlobEvent) => {
-          audioChunks.push(event.data);
+          audioChunksRef.current.push(event.data);
         });
         mediaRecorderRef.current.addEventListener('stop', handleStop);
         mediaRecorderRef.current.start(100);
@@ -174,6 +218,11 @@ const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void
   };
 
   const externalStartRecording = () => {
+    if (typeof MediaRecorder === 'undefined') {
+      showToast({ message: 'MediaRecorder is not supported in this browser', status: 'error' });
+      return;
+    }
+
     if (isListening) {
       showToast({ message: 'Already listening. Please stop recording first.', status: 'warning' });
       return;
@@ -194,43 +243,11 @@ const useSpeechToTextExternal = (onTranscriptionComplete: (text: string) => void
     stopRecording();
   };
 
-  const handleKeyDown = async (e: KeyboardEvent) => {
-    if (e.shiftKey && e.altKey && e.code === 'KeyL' && isExternalSTTEnabled) {
-      if (!window.MediaRecorder) {
-        showToast({ message: 'MediaRecorder is not supported in this browser', status: 'error' });
-        return;
-      }
-
-      if (permission === false) {
-        await getMicrophonePermission();
-      }
-
-      if (isListening) {
-        stopRecording();
-      } else {
-        startRecording();
-      }
-
-      e.preventDefault();
-    }
-  };
-
-  useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isListening]);
-
   return {
     isListening,
-    isLoading: isProcessing,
-    text,
-    externalStartRecording,
     externalStopRecording,
-    clearText,
+    externalStartRecording,
+    isLoading: isProcessing,
   };
 };
 

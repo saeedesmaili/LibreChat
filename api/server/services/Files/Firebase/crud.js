@@ -2,10 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const fetch = require('node-fetch');
+const { logger } = require('@librechat/data-schemas');
+const {
+  deleteRagFile,
+  getFirebaseStorage,
+  assertRemoteFileURL,
+  getRemoteFileFetchMaxBytes,
+  getRemoteFileFetchTimeoutMs,
+  assertRemoteFileContentLength,
+} = require('@librechat/api');
 const { ref, uploadBytes, getDownloadURL, deleteObject } = require('firebase/storage');
 const { getBufferMetadata } = require('~/server/utils');
-const { getFirebaseStorage } = require('./initialize');
-const { logger } = require('~/config');
 
 /**
  * Deletes a file from Firebase Storage.
@@ -57,8 +64,19 @@ async function saveURLToFirebase({ userId, URL, fileName, basePath = 'images' })
   }
 
   const storageRef = ref(storage, `${basePath}/${userId.toString()}/${fileName}`);
-  const response = await fetch(URL);
+  const maxBytes = getRemoteFileFetchMaxBytes();
+  const response = await fetch(assertRemoteFileURL(URL), {
+    timeout: getRemoteFileFetchTimeoutMs(),
+    size: maxBytes,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+  }
+  assertRemoteFileContentLength(response.headers, maxBytes);
   const buffer = await response.buffer();
+  if (buffer.length > maxBytes) {
+    throw new Error(`Remote file response too large: ${buffer.length} bytes`);
+  }
 
   try {
     await uploadBytes(storageRef, buffer);
@@ -145,7 +163,10 @@ function extractFirebaseFilePath(urlString) {
     }
 
     return '';
-  } catch (error) {
+  } catch {
+    logger.debug(
+      '[extractFirebaseFilePath] Failed to extract Firebase file path from URL, returning empty string',
+    );
     // If URL parsing fails, return an empty string
     return '';
   }
@@ -164,17 +185,7 @@ function extractFirebaseFilePath(urlString) {
  *          Throws an error if there is an issue with deletion.
  */
 const deleteFirebaseFile = async (req, file) => {
-  if (file.embedded && process.env.RAG_API_URL) {
-    const jwtToken = req.headers.authorization.split(' ')[1];
-    axios.delete(`${process.env.RAG_API_URL}/documents`, {
-      headers: {
-        Authorization: `Bearer ${jwtToken}`,
-        'Content-Type': 'application/json',
-        accept: 'application/json',
-      },
-      data: [file.file_id],
-    });
-  }
+  await deleteRagFile({ userId: req.user.id, file });
 
   const fileName = extractFirebaseFilePath(file.filepath);
   if (!fileName.includes(req.user.id)) {
@@ -211,23 +222,34 @@ async function uploadFileToFirebase({ req, file, file_id }) {
   const inputBuffer = await fs.promises.readFile(inputFilePath);
   const bytes = Buffer.byteLength(inputBuffer);
   const userId = req.user.id;
-
   const fileName = `${file_id}__${path.basename(inputFilePath)}`;
-
-  const downloadURL = await saveBufferToFirebase({ userId, buffer: inputBuffer, fileName });
-
-  await fs.promises.unlink(inputFilePath);
-
-  return { filepath: downloadURL, bytes };
+  try {
+    const downloadURL = await saveBufferToFirebase({ userId, buffer: inputBuffer, fileName });
+    return { filepath: downloadURL, bytes };
+  } catch (err) {
+    logger.error('[uploadFileToFirebase] Error saving file buffer to Firebase:', err);
+    try {
+      if (file && file.path) {
+        await fs.promises.unlink(file.path);
+      }
+    } catch (unlinkError) {
+      logger.error(
+        '[uploadFileToFirebase] Error deleting temporary file, likely already deleted:',
+        unlinkError.message,
+      );
+    }
+    throw err;
+  }
 }
 
 /**
  * Retrieves a readable stream for a file from Firebase storage.
  *
+ * @param {ServerRequest} _req
  * @param {string} filepath - The filepath.
  * @returns {Promise<ReadableStream>} A readable stream of the file.
  */
-async function getFirebaseFileStream(filepath) {
+async function getFirebaseFileStream(_req, filepath) {
   try {
     const storage = getFirebaseStorage();
     if (!storage) {

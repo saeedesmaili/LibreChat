@@ -5,6 +5,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useRecoilState, useRecoilValue, useSetRecoilState } from 'recoil';
 import type { TMessage } from 'librechat-data-provider';
 import { useCustomAudioRef, MediaSourceAppender, usePauseGlobalAudio } from '~/hooks/Audio';
+import { useLatestMessage } from '~/hooks/Messages/useLatestMessage';
 import { getLatestText, logger } from '~/utils';
 import { useAuthContext } from '~/hooks';
 import { globalAudioId } from '~/common';
@@ -29,7 +30,7 @@ export default function StreamAudio({ index = 0 }) {
   const activeRunId = useRecoilValue(store.activeRunFamily(index));
   const automaticPlayback = useRecoilValue(store.automaticPlayback);
   const isSubmitting = useRecoilValue(store.isSubmittingFamily(index));
-  const latestMessage = useRecoilValue(store.latestMessageFamily(index));
+  const latestMessage = useLatestMessage(index);
   const setIsPlaying = useSetRecoilState(store.globalAudioPlayingFamily(index));
   const [audioRunId, setAudioRunId] = useRecoilState(store.audioRunFamily(index));
   const [isFetching, setIsFetching] = useRecoilState(store.globalAudioFetchingFamily(index));
@@ -39,7 +40,7 @@ export default function StreamAudio({ index = 0 }) {
   const { pauseGlobalAudio } = usePauseGlobalAudio();
 
   const { conversationId: paramId } = useParams();
-  const queryParam = paramId === 'new' ? paramId : latestMessage?.conversationId ?? paramId ?? '';
+  const queryParam = paramId === 'new' ? paramId : (latestMessage?.conversationId ?? paramId ?? '');
 
   const queryClient = useQueryClient();
   const getMessages = useCallback(
@@ -53,7 +54,7 @@ export default function StreamAudio({ index = 0 }) {
     const shouldFetch = !!(
       token != null &&
       automaticPlayback &&
-      isSubmitting &&
+      !isSubmitting &&
       latestMessage &&
       !latestMessage.isCreatedByUser &&
       latestText &&
@@ -118,14 +119,14 @@ export default function StreamAudio({ index = 0 }) {
         }
 
         let done = false;
-        const chunks: Uint8Array[] = [];
+        const chunks: ArrayBuffer[] = [];
 
         while (!done) {
           const readPromise = reader.read();
           const { value, done: readerDone } = (await Promise.race([
             readPromise,
             timeoutPromise(maxPromiseTime, promiseTimeoutMessage),
-          ])) as ReadableStreamReadResult<Uint8Array>;
+          ])) as ReadableStreamReadResult<ArrayBuffer>;
 
           if (cacheTTS && value) {
             chunks.push(value);
@@ -195,8 +196,8 @@ export default function StreamAudio({ index = 0 }) {
 
   useEffect(() => {
     if (
-      playbackRate &&
-      globalAudioURL &&
+      playbackRate != null &&
+      globalAudioURL != null &&
       playbackRate > 0 &&
       audioRef.current &&
       audioRef.current.playbackRate !== playbackRate
@@ -213,6 +214,7 @@ export default function StreamAudio({ index = 0 }) {
 
   logger.log('StreamAudio.tsx - globalAudioURL:', globalAudioURL);
   return (
+    // eslint-disable-next-line jsx-a11y/media-has-caption
     <audio
       ref={audioRef}
       controls
@@ -226,7 +228,6 @@ export default function StreamAudio({ index = 0 }) {
       }}
       src={globalAudioURL ?? undefined}
       id={globalAudioId}
-      muted
       autoPlay
     />
   );

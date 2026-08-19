@@ -1,43 +1,62 @@
-import { useState, useRef } from 'react';
+import { memo, useMemo, useRef, useState } from 'react';
+import { Folder } from 'lucide-react';
+import * as Ariakit from '@ariakit/react';
 import { useFormContext } from 'react-hook-form';
-import {
-  EModelEndpoint,
-  EToolResources,
-  mergeFileConfig,
-  AgentCapabilities,
-  retrievalMimeTypes,
-  fileConfig as defaultFileConfig,
-} from 'librechat-data-provider';
+import { SharePointIcon, DropdownPopup } from '@librechat/client';
+import { EModelEndpoint, EToolResources, AgentCapabilities } from 'librechat-data-provider';
 import type { ExtendedFile, AgentForm } from '~/common';
-import { useFileHandling, useLocalize, useLazyEffect } from '~/hooks';
-import FileRow from '~/components/Chat/Input/Files/FileRow';
-import FileSearchCheckbox from './FileSearchCheckbox';
-import { useGetFileConfig } from '~/data-provider';
-import { AttachmentIcon } from '~/components/svg';
-import { useChatContext } from '~/Providers';
+import { useSharePointFileHandlingNoChatContext } from '~/hooks/Files/useSharePointFileHandling';
+import FileRow, { FileRowWrapper } from '~/components/Chat/Input/Files/FileRow';
+import { useFileHandlingNoChatContext } from '~/hooks/Files/useFileHandling';
+import { useAgentFileConfig, useLocalize, useLazyEffect } from '~/hooks';
+import DropzoneContent, { dropzoneClassName } from './UploadDropzone';
+import { SharePointPickerDialog } from '~/components/SharePoint';
+import { useGetStartupConfig } from '~/data-provider';
+import SectionHeader from './SectionHeader';
+import { isEphemeralAgent } from '~/common';
 
-export default function FileSearch({
+function FileSearch({
   agent_id,
   files: _files,
+  showHeader = true,
 }: {
   agent_id: string;
   files?: [string, ExtendedFile][];
+  showHeader?: boolean;
 }) {
   const localize = useLocalize();
-  const { setFilesLoading } = useChatContext();
-  const { watch } = useFormContext<AgentForm>();
+  const { setValue } = useFormContext<AgentForm>();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<Map<string, ExtendedFile>>(new Map());
+  const fileHandlingState = useMemo(() => ({ files, setFiles, conversation: null }), [files]);
+  const [isPopoverActive, setIsPopoverActive] = useState(false);
+  const [isSharePointDialogOpen, setIsSharePointDialogOpen] = useState(false);
 
-  const { data: fileConfig = defaultFileConfig } = useGetFileConfig({
-    select: (data) => mergeFileConfig(data),
-  });
+  // Get startup configuration for SharePoint feature flag
+  const { data: startupConfig } = useGetStartupConfig();
+  const { endpointFileConfig, providerValue, endpointType } = useAgentFileConfig();
+  const endpointOverride = providerValue || EModelEndpoint.agents;
 
-  const { handleFileChange } = useFileHandling({
-    overrideEndpoint: EModelEndpoint.agents,
-    additionalMetadata: { agent_id, tool_resource: EToolResources.file_search },
-    fileSetter: setFiles,
-  });
+  const { handleFileChange } = useFileHandlingNoChatContext(
+    {
+      additionalMetadata: { agent_id, tool_resource: EToolResources.file_search },
+      endpointOverride,
+      endpointTypeOverride: endpointType,
+      fileSetter: setFiles,
+    },
+    fileHandlingState,
+  );
+
+  const { handleSharePointFiles, isProcessing, downloadProgress } =
+    useSharePointFileHandlingNoChatContext(
+      {
+        additionalMetadata: { agent_id, tool_resource: EToolResources.file_search },
+        endpointOverride,
+        endpointTypeOverride: endpointType,
+        fileSetter: setFiles,
+      },
+      fileHandlingState,
+    );
 
   useLazyEffect(
     () => {
@@ -49,16 +68,36 @@ export default function FileSearch({
     750,
   );
 
-  const fileSearchChecked = watch(AgentCapabilities.file_search);
+  const isUploadDisabled = endpointFileConfig?.disabled ?? false;
+  const sharePointEnabled = startupConfig?.sharePointFilePickerEnabled;
+  const disabledUploadButton = isEphemeralAgent(agent_id);
 
-  const endpointFileConfig = fileConfig.endpoints[EModelEndpoint.agents];
-  const isUploadDisabled = endpointFileConfig.disabled ?? false;
+  const enableFileSearch = () =>
+    setValue(AgentCapabilities.file_search, true, { shouldDirty: true });
 
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      enableFileSearch();
+    }
+    handleFileChange(event);
+  };
+
+  const handleSharePointFilesSelected = async (sharePointFiles: any[]) => {
+    try {
+      await handleSharePointFiles(sharePointFiles);
+      if (sharePointFiles.length > 0) {
+        enableFileSearch();
+      }
+      setIsSharePointDialogOpen(false);
+    } catch (error) {
+      console.error('SharePoint file processing error:', error);
+    }
+  };
   if (isUploadDisabled) {
     return null;
   }
 
-  const handleButtonClick = () => {
+  const handleLocalFileClick = () => {
     // necessary to reset the input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -66,38 +105,76 @@ export default function FileSearch({
     fileInputRef.current?.click();
   };
 
+  const dropdownItems = [
+    {
+      label: localize('com_files_upload_local_machine'),
+      onClick: handleLocalFileClick,
+      icon: <Folder className="icon-md" />,
+    },
+    {
+      label: localize('com_files_upload_sharepoint'),
+      onClick: () => setIsSharePointDialogOpen(true),
+      icon: <SharePointIcon className="icon-md" />,
+    },
+  ];
+
+  const dropzoneLabel = localize('com_ui_upload_file_search');
+  const dropzoneHint = localize('com_ui_upload_files_hint');
+
+  const menuTrigger = (
+    <Ariakit.MenuButton disabled={disabledUploadButton} className={dropzoneClassName}>
+      <DropzoneContent label={dropzoneLabel} hint={dropzoneHint} />
+    </Ariakit.MenuButton>
+  );
+
   return (
     <div className="w-full">
-      <div className="mb-1.5 flex items-center gap-2">
-        <span>
-          <label className="text-token-text-primary block font-medium">
-            {localize('com_assistants_file_search')}
-          </label>
-        </span>
-      </div>
-      <FileSearchCheckbox />
+      {showHeader && (
+        <SectionHeader
+          title={localize('com_assistants_file_search')}
+          info={localize('com_agents_file_search_info')}
+        />
+      )}
       <div className="flex flex-col gap-3">
+        {/* File Search (RAG API) Files */}
+        <FileRow
+          files={files}
+          setFiles={setFiles}
+          agent_id={agent_id}
+          tool_resource={EToolResources.file_search}
+          Wrapper={FileRowWrapper}
+        />
         <div>
-          <button
-            type="button"
-            disabled={!agent_id || fileSearchChecked === false}
-            className="btn btn-neutral border-token-border-light relative h-9 w-full rounded-lg font-medium"
-            onClick={handleButtonClick}
-          >
-            <div className="flex w-full items-center justify-center gap-1">
-              <AttachmentIcon className="text-token-text-primary h-4 w-4" />
-              <input
-                multiple={true}
-                type="file"
-                style={{ display: 'none' }}
-                tabIndex={-1}
-                ref={fileInputRef}
-                disabled={!agent_id || fileSearchChecked === false}
-                onChange={handleFileChange}
-              />
-              {localize('com_ui_upload_file_search')}
-            </div>
-          </button>
+          {sharePointEnabled ? (
+            <DropdownPopup
+              gutter={2}
+              menuId="file-search-upload-menu"
+              isOpen={isPopoverActive}
+              setIsOpen={setIsPopoverActive}
+              trigger={menuTrigger}
+              items={dropdownItems}
+              modal={true}
+              unmountOnHide={true}
+            />
+          ) : (
+            <button
+              type="button"
+              disabled={disabledUploadButton}
+              className={dropzoneClassName}
+              onClick={handleLocalFileClick}
+            >
+              <DropzoneContent label={dropzoneLabel} hint={dropzoneHint} />
+            </button>
+          )}
+          <input
+            multiple={true}
+            type="file"
+            style={{ display: 'none' }}
+            tabIndex={-1}
+            ref={fileInputRef}
+            disabled={disabledUploadButton}
+            onChange={handleFileUpload}
+          />
         </div>
         {/* Disabled Message */}
         {agent_id ? null : (
@@ -105,19 +182,22 @@ export default function FileSearch({
             {localize('com_agents_file_search_disabled')}
           </div>
         )}
-        {/* Knowledge Files */}
-        <FileRow
-          files={files}
-          setFiles={setFiles}
-          setFilesLoading={setFilesLoading}
-          agent_id={agent_id}
-          tool_resource={EToolResources.file_search}
-          fileFilter={(file: ExtendedFile) =>
-            retrievalMimeTypes.some((regex) => regex.test(file.type ?? ''))
-          }
-          Wrapper={({ children }) => <div className="flex flex-wrap gap-2">{children}</div>}
-        />
       </div>
+
+      <SharePointPickerDialog
+        isOpen={isSharePointDialogOpen}
+        onOpenChange={setIsSharePointDialogOpen}
+        onFilesSelected={handleSharePointFilesSelected}
+        disabled={disabledUploadButton}
+        isDownloading={isProcessing}
+        downloadProgress={downloadProgress}
+        maxSelectionCount={endpointFileConfig?.fileLimit}
+      />
     </div>
   );
 }
+
+const MemoizedFileSearch = memo(FileSearch);
+MemoizedFileSearch.displayName = 'FileSearch';
+
+export default MemoizedFileSearch;

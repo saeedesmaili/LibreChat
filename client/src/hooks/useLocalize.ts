@@ -1,15 +1,15 @@
 import { useCallback } from 'react';
-import { useRecoilValue } from 'recoil';
-import { localize } from '~/localization/Translation';
-import store from '~/store';
+import { TOptions } from 'i18next';
+import { useTranslation } from 'react-i18next';
+import translationEn from '~/locales/en/translation.json';
+
+export type TranslationKeys = keyof typeof translationEn;
 
 export default function useLocalize() {
-  const lang = useRecoilValue(store.lang);
+  const { t } = useTranslation();
 
-  const memoizedLocalize = useCallback(
-    (phraseKey: string, ...values: string[]) => localize(lang, phraseKey, ...(values ?? [])),
-    [lang], // Only recreate the function when `lang` changes
+  return useCallback(
+    (phraseKey: TranslationKeys, options?: TOptions) => t(phraseKey, options),
+    [t],
   );
-
-  return memoizedLocalize;
 }

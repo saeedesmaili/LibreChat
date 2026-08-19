@@ -1,5 +1,6 @@
-import { useLocalize, useLocalStorage } from '~/hooks';
-import { TooltipAnchor } from '~/components/ui';
+import { TooltipAnchor } from '@librechat/client';
+import { useShortcutAriaKey, useShortcutHint } from '~/hooks/useKeyboardShortcuts';
+import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
 export default function NavToggle({
@@ -10,6 +11,14 @@ export default function NavToggle({
   side = 'left',
   className = '',
   translateX = true,
+}: {
+  onToggle: () => void;
+  navVisible: boolean;
+  isHovering: boolean;
+  setIsHovering: (isHovering: boolean) => void;
+  side?: 'left' | 'right';
+  className?: string;
+  translateX?: boolean;
 }) {
   const localize = useLocalize();
   const transition = {
@@ -21,28 +30,47 @@ export default function NavToggle({
   const topBarRotation = side === 'right' ? `-${rotation}` : rotation;
   const bottomBarRotation = side === 'right' ? rotation : `-${rotation}`;
 
+  let sidebarLabel;
+  let actionKey;
+
+  if (side === 'left') {
+    sidebarLabel = localize('com_ui_chat_history');
+  } else {
+    sidebarLabel = localize('com_nav_control_panel');
+  }
+
+  if (navVisible) {
+    actionKey = 'com_ui_close_var';
+  } else {
+    actionKey = 'com_ui_open_var';
+  }
+
+  const ariaDescription = localize(actionKey, { 0: sidebarLabel });
+  const shortcutId = side === 'left' ? 'toggleSidebar' : undefined;
+  const tooltipDescription = useShortcutHint(shortcutId, ariaDescription);
+  const ariaKey = useShortcutAriaKey(shortcutId);
+
   return (
     <div
       className={cn(
         className,
         '-translate-y-1/2 transition-transform',
         navVisible ? 'rotate-0' : 'rotate-180',
-        navVisible && translateX ? 'translate-x-[260px]' : 'translate-x-0 ',
+        navVisible && translateX ? 'translate-x-[260px]' : 'translate-x-0',
       )}
       onMouseEnter={() => setIsHovering(true)}
       onMouseLeave={() => setIsHovering(false)}
     >
       <TooltipAnchor
         side={side === 'right' ? 'left' : 'right'}
-        aria-label={side === 'left' ? localize('com_ui_chat_history') : localize('com_ui_controls')}
+        aria-label={ariaDescription}
         aria-expanded={navVisible}
         aria-controls={side === 'left' ? 'chat-history-nav' : 'controls-nav'}
         id={`toggle-${side}-nav`}
         onClick={onToggle}
         role="button"
-        description={
-          navVisible ? localize('com_nav_close_sidebar') : localize('com_nav_open_sidebar')
-        }
+        description={tooltipDescription}
+        aria-keyshortcuts={ariaKey}
         className="flex items-center justify-center"
         tabIndex={0}
       >
@@ -54,7 +82,7 @@ export default function NavToggle({
             <div className="flex h-6 w-6 flex-col items-center">
               {/* Top bar */}
               <div
-                className="h-3 w-1 rounded-full bg-black dark:bg-white"
+                className="h-3 w-1 rounded-full bg-surface-inverted"
                 style={{
                   ...transition,
                   transform: `translateY(0.15rem) rotate(${topBarRotation}) translateZ(0px)`,
@@ -62,7 +90,7 @@ export default function NavToggle({
               />
               {/* Bottom bar */}
               <div
-                className="h-3 w-1 rounded-full bg-black dark:bg-white"
+                className="h-3 w-1 rounded-full bg-surface-inverted"
                 style={{
                   ...transition,
                   transform: `translateY(-0.15rem) rotate(${bottomBarRotation}) translateZ(0px)`,

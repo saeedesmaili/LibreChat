@@ -1,143 +1,225 @@
-import { useMemo } from 'react';
-import { EModelEndpoint, Constants } from 'librechat-data-provider';
-import { useGetEndpointsQuery, useGetStartupConfig } from 'librechat-data-provider/react-query';
-import type * as t from 'librechat-data-provider';
-import type { ReactNode } from 'react';
+import { useMemo, useCallback, useState, useEffect, useRef } from 'react';
+import { easings } from '@react-spring/web';
+import { EModelEndpoint } from 'librechat-data-provider';
+import { BirthdayIcon, TooltipAnchor, SplitText } from '@librechat/client';
+import {
+  getIconEndpoint,
+  getEntity,
+  getModelSpec,
+  createConfigHtmlSanitizer,
+  CONFIG_HTML_MEDIA_TAGS,
+  CONFIG_HTML_MEDIA_ATTR,
+} from '~/utils';
 import { useChatContext, useAgentsMapContext, useAssistantsMapContext } from '~/Providers';
-import { useGetAssistantDocsQuery } from '~/data-provider';
+import { useGetEndpointsQuery, useGetStartupConfig } from '~/data-provider';
+import { useLocalize, useAuthContext, useGreeting } from '~/hooks';
+import AgentContact from '~/components/Agents/AgentContact';
 import ConvoIcon from '~/components/Endpoints/ConvoIcon';
-import { getIconEndpoint, getEntity, cn } from '~/utils';
-import { useLocalize, useSubmitMessage } from '~/hooks';
-import { TooltipAnchor } from '~/components/ui';
-import { BirthdayIcon } from '~/components/svg';
-import ConvoStarter from './ConvoStarter';
 
-export default function Landing({ Header }: { Header?: ReactNode }) {
+const containerClassName =
+  'shadow-stroke relative flex h-full items-center justify-center rounded-full bg-presentation text-text-primary dark:after:shadow-none ';
+
+/** Stable references: fresh literals re-initialized SplitText's springs and
+ * re-rendered every grapheme span on each Landing render. */
+const greetingAnimationFrom = { opacity: 0, transform: 'translate3d(0,50px,0)' };
+const greetingAnimationTo = { opacity: 1, transform: 'translate3d(0,0,0)' };
+
+function getTextSizeClass(text: string | undefined | null) {
+  if (!text) {
+    return 'text-xl sm:text-2xl';
+  }
+
+  if (text.length < 56) {
+    return 'text-2xl sm:text-4xl';
+  }
+
+  if (text.length < 70) {
+    return 'text-xl sm:text-2xl';
+  }
+
+  return 'text-lg sm:text-base';
+}
+
+export default function Landing({ centerFormOnLanding }: { centerFormOnLanding: boolean }) {
   const { conversation } = useChatContext();
   const agentsMap = useAgentsMapContext();
   const assistantMap = useAssistantsMapContext();
   const { data: startupConfig } = useGetStartupConfig();
   const { data: endpointsConfig } = useGetEndpointsQuery();
-
+  const { user } = useAuthContext();
   const localize = useLocalize();
 
-  let { endpoint = '' } = conversation ?? {};
+  const [textHasMultipleLines, setTextHasMultipleLines] = useState(false);
+  const [lineCount, setLineCount] = useState(1);
+  const [contentHeight, setContentHeight] = useState(0);
+  const contentRef = useRef<HTMLDivElement>(null);
 
-  if (
-    endpoint === EModelEndpoint.chatGPTBrowser ||
-    endpoint === EModelEndpoint.azureOpenAI ||
-    endpoint === EModelEndpoint.gptPlugins
-  ) {
-    endpoint = EModelEndpoint.openAI;
-  }
-
-  const iconURL = conversation?.iconURL;
-  endpoint = getIconEndpoint({ endpointsConfig, iconURL, endpoint });
-  const { data: documentsMap = new Map() } = useGetAssistantDocsQuery(endpoint, {
-    select: (data) => new Map(data.map((dbA) => [dbA.assistant_id, dbA])),
-  });
+  const endpointType = useMemo(() => {
+    let ep = conversation?.endpoint ?? '';
+    if (ep === EModelEndpoint.azureOpenAI) {
+      ep = EModelEndpoint.openAI;
+    }
+    return getIconEndpoint({
+      endpointsConfig,
+      iconURL: conversation?.iconURL,
+      endpoint: ep,
+    });
+  }, [conversation?.endpoint, conversation?.iconURL, endpointsConfig]);
 
   const { entity, isAgent, isAssistant } = getEntity({
-    endpoint,
+    endpoint: endpointType,
     agentsMap,
     assistantMap,
     agent_id: conversation?.agent_id,
     assistant_id: conversation?.assistant_id,
   });
 
-  const name = entity?.name ?? '';
-  const description = entity?.description ?? '';
-  const avatar = isAgent
-    ? (entity as t.Agent | undefined)?.avatar?.filepath ?? ''
-    : ((entity as t.Assistant | undefined)?.metadata?.avatar as string | undefined) ?? '';
-  const conversation_starters = useMemo(() => {
-    /* The user made updates, use client-side cache, or they exist in an Agent */
-    if (entity && (entity.conversation_starters?.length ?? 0) > 0) {
-      return entity.conversation_starters;
+  const modelSpec = useMemo(
+    () => getModelSpec({ specName: conversation?.spec, startupConfig }),
+    [conversation?.spec, startupConfig],
+  );
+
+  const brandedSpecLabel = modelSpec?.showOnLanding ? modelSpec.label : '';
+  const brandedSpecDescription = (modelSpec?.showOnLanding && modelSpec.description) || '';
+  const name = entity?.name ?? brandedSpecLabel;
+  const description =
+    (entity?.description || brandedSpecDescription || conversation?.greeting) ?? '';
+  const descriptionIsHTML = description.trim().startsWith('<');
+
+  const sanitizeDescription = useMemo(
+    () =>
+      createConfigHtmlSanitizer({
+        allowedTags: CONFIG_HTML_MEDIA_TAGS,
+        allowedAttr: CONFIG_HTML_MEDIA_ATTR,
+      }),
+    [],
+  );
+  const selectedAgent =
+    isAgent && conversation?.agent_id != null ? agentsMap?.[conversation.agent_id] : undefined;
+
+  const customWelcome =
+    typeof startupConfig?.interface?.customWelcome === 'string'
+      ? startupConfig.interface.customWelcome
+      : undefined;
+
+  const scheduledGreeting = useGreeting(user?.name);
+
+  const handleLineCountChange = useCallback((count: number) => {
+    setTextHasMultipleLines(count > 1);
+    setLineCount(count);
+  }, []);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setContentHeight(contentRef.current.offsetHeight);
     }
-    if (isAgent) {
-      return entity?.conversation_starters ?? [];
+  }, [lineCount, description, selectedAgent]);
+
+  const getDynamicMargin = useMemo(() => {
+    let margin = 'mb-0';
+
+    if (lineCount > 2 || (description && description.length > 100)) {
+      margin = 'mb-10';
+    } else if (lineCount > 1 || (description && description.length > 0)) {
+      margin = 'mb-6';
+    } else if (textHasMultipleLines) {
+      margin = 'mb-4';
     }
 
-    /* If none in cache, we use the latest assistant docs */
-    const entityDocs = documentsMap.get(entity?.id ?? '');
-    return entityDocs?.conversation_starters ?? [];
-  }, [documentsMap, isAgent, entity]);
-
-  const containerClassName =
-    'shadow-stroke relative flex h-full items-center justify-center rounded-full bg-white text-black';
-
-  const { submitMessage } = useSubmitMessage();
-  const sendConversationStarter = (text: string) => submitMessage({ text });
-
-  const getWelcomeMessage = () => {
-    const greeting = conversation?.greeting ?? '';
-    if (greeting) {
-      return greeting;
+    if (contentHeight > 200) {
+      margin = 'mb-16';
+    } else if (contentHeight > 150) {
+      margin = 'mb-12';
     }
 
-    if (isAssistant) {
-      return localize('com_nav_welcome_assistant');
-    }
+    return margin;
+  }, [lineCount, description, textHasMultipleLines, contentHeight]);
 
-    if (isAgent) {
-      return localize('com_nav_welcome_agent');
-    }
+  const resolvedWelcome =
+    customWelcome != null && user?.name
+      ? customWelcome.replace(/{{user.name}}/g, user.name)
+      : customWelcome;
 
-    return localize('com_nav_welcome_message');
-  };
+  const greetingText = resolvedWelcome ?? scheduledGreeting;
 
   return (
-    <div className="relative h-full">
-      <div className="absolute left-0 right-0">{Header != null ? Header : null}</div>
-      <div className="flex h-full flex-col items-center justify-center">
-        <div className={cn('relative h-12 w-12', name && avatar ? 'mb-0' : 'mb-3')}>
-          <ConvoIcon
-            agentsMap={agentsMap}
-            assistantMap={assistantMap}
-            conversation={conversation}
-            endpointsConfig={endpointsConfig}
-            containerClassName={containerClassName}
-            context="landing"
-            className="h-2/3 w-2/3"
-            size={41}
-          />
-          {startupConfig?.showBirthdayIcon === true ? (
-            <TooltipAnchor
-              className="absolute bottom-8 right-2.5"
-              description={localize('com_ui_happy_birthday')}
-            >
-              <BirthdayIcon />
-            </TooltipAnchor>
-          ) : null}
-        </div>
-        {name ? (
-          <div className="flex flex-col items-center gap-0 p-2">
-            <div className="text-center text-2xl font-medium dark:text-white">{name}</div>
-            <div className="max-w-md text-center text-sm font-normal text-text-primary ">
-              {description ? description : localize('com_nav_welcome_message')}
-            </div>
-            {/* <div className="mt-1 flex items-center gap-1 text-token-text-tertiary">
-            <div className="text-sm text-token-text-tertiary">By Daniel Avila</div>
-          </div> */}
+    <div
+      className={`flex h-full transform-gpu flex-col items-center justify-center pb-16 transition-all duration-200 ${centerFormOnLanding ? 'max-h-full sm:max-h-0' : 'max-h-full'} ${getDynamicMargin}`}
+    >
+      <div ref={contentRef} className="flex flex-col items-center gap-0 p-2">
+        <div
+          className={`flex ${textHasMultipleLines ? 'flex-col' : 'flex-col md:flex-row'} items-center justify-center gap-2`}
+        >
+          <div className={`relative size-10 justify-center ${textHasMultipleLines ? 'mb-2' : ''}`}>
+            <ConvoIcon
+              agentsMap={agentsMap}
+              assistantMap={assistantMap}
+              conversation={conversation}
+              endpointsConfig={endpointsConfig}
+              containerClassName={containerClassName}
+              context="landing"
+              className="h-2/3 w-2/3 text-text-primary"
+              size={41}
+            />
+            {startupConfig?.showBirthdayIcon && (
+              <TooltipAnchor
+                className="absolute bottom-[27px] right-2"
+                description={localize('com_ui_happy_birthday')}
+                aria-label={localize('com_ui_happy_birthday')}
+              >
+                <BirthdayIcon />
+              </TooltipAnchor>
+            )}
           </div>
-        ) : (
-          <h2 className="mb-5 max-w-[75vh] px-12 text-center text-lg font-medium dark:text-white md:px-0 md:text-2xl">
-            {getWelcomeMessage()}
-          </h2>
-        )}
-        <div className="mt-8 flex flex-wrap justify-center gap-3 px-4">
-          {conversation_starters.length > 0 &&
-            conversation_starters
-              .slice(0, Constants.MAX_CONVO_STARTERS)
-              .map((text: string, index: number) => (
-                <ConvoStarter
-                  key={index}
-                  text={text}
-                  onClick={() => sendConversationStarter(text)}
-                />
-              ))}
+          {((isAgent || isAssistant) && name) || name ? (
+            <div className="flex flex-col items-center gap-0 p-2">
+              <SplitText
+                key={`split-text-${name}`}
+                text={name}
+                className={`${getTextSizeClass(name)} font-medium text-text-primary`}
+                delay={50}
+                textAlign="center"
+                animationFrom={greetingAnimationFrom}
+                animationTo={greetingAnimationTo}
+                easing={easings.easeOutCubic}
+                threshold={0}
+                rootMargin="0px"
+                onLineCountChange={handleLineCountChange}
+              />
+            </div>
+          ) : (
+            <SplitText
+              key={`split-text-${greetingText}${user?.name ? '-user' : ''}`}
+              text={greetingText}
+              className={`${getTextSizeClass(greetingText)} font-medium text-text-primary`}
+              delay={50}
+              textAlign="center"
+              animationFrom={greetingAnimationFrom}
+              animationTo={greetingAnimationTo}
+              easing={easings.easeOutCubic}
+              threshold={0}
+              rootMargin="0px"
+              onLineCountChange={handleLineCountChange}
+            />
+          )}
         </div>
+        {description &&
+          (descriptionIsHTML ? (
+            <div
+              className="animate-fadeIn mt-4 flex max-w-md items-center justify-center gap-2 text-center text-sm font-normal text-text-primary [&_img]:inline-block [&_img]:h-4 [&_img]:w-4"
+              dangerouslySetInnerHTML={{ __html: sanitizeDescription(description) }}
+            />
+          ) : (
+            <div className="animate-fadeIn mt-4 max-w-md text-center text-sm font-normal text-text-primary">
+              {description}
+            </div>
+          ))}
+        {selectedAgent && (
+          <AgentContact
+            agent={selectedAgent}
+            className="animate-fadeIn mt-2 max-w-md justify-center text-center text-sm"
+          />
+        )}
       </div>
     </div>
   );

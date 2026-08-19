@@ -1,19 +1,21 @@
 import React from 'react';
-import { CrossIcon } from '~/components/svg';
-import { Button } from '~/components/ui';
+import { Button } from '@librechat/client';
+import { useLocalize } from '~/hooks';
 
 type ActionButtonProps = {
   onClick: () => void;
 };
 
 export default function ActionButton({ onClick }: ActionButtonProps) {
+  const localize = useLocalize();
   return (
     <div className="w-32">
       <Button
-        className="w-full rounded-md border border-black bg-white p-0 text-black hover:bg-black hover:text-white"
+        className="w-full rounded-md border border-text-primary bg-surface-primary p-0 text-text-primary hover:bg-surface-inverted hover:text-text-inverted"
         onClick={onClick}
       >
-        Action Button
+        {/* Action Button */}
+        {localize('com_ui_action_button')}
       </Button>
     </div>
   );

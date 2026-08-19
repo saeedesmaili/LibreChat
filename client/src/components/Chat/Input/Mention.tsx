@@ -1,45 +1,58 @@
-import { useState, useRef, useEffect } from 'react';
+import { memo, useState, useRef, useEffect } from 'react';
+import { AutoSizer, List } from 'react-virtualized';
 import { EModelEndpoint } from 'librechat-data-provider';
-import type { SetterOrUpdater } from 'recoil';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
+import { Input, Spinner, useCombobox } from '@librechat/client';
+import type { RecoilState } from 'recoil';
 import type { MentionOption, ConvoGenerator } from '~/common';
+import { useGetConversation, useLocalize, TranslationKeys } from '~/hooks';
+import useInitPopoverInput from '~/hooks/Input/useInitPopoverInput';
 import useSelectMention from '~/hooks/Input/useSelectMention';
 import { useAssistantsMapContext } from '~/Providers';
 import useMentions from '~/hooks/Input/useMentions';
-import { useLocalize, useCombobox } from '~/hooks';
 import { removeCharIfLast } from '~/utils';
 import MentionItem from './MentionItem';
 
-export default function Mention({
-  setShowMentionPopover,
+const ROW_HEIGHT = 44;
+
+type MentionProps = {
+  index: number;
+  popoverAtom: RecoilState<boolean>;
+  newConversation: ConvoGenerator;
+  textAreaRef: React.MutableRefObject<HTMLTextAreaElement | null>;
+  commandChar?: string;
+  placeholder?: TranslationKeys;
+  includeAssistants?: boolean;
+};
+
+function MentionContent({
+  popoverAtom,
   newConversation,
   textAreaRef,
   commandChar = '@',
   placeholder = 'com_ui_mention',
   includeAssistants = true,
-}: {
-  setShowMentionPopover: SetterOrUpdater<boolean>;
-  newConversation: ConvoGenerator;
-  textAreaRef: React.MutableRefObject<HTMLTextAreaElement | null>;
-  commandChar?: string;
-  placeholder?: string;
-  includeAssistants?: boolean;
-}) {
+}: Omit<MentionProps, 'index'>) {
   const localize = useLocalize();
-  const assistantMap = useAssistantsMapContext();
+  const getConversation = useGetConversation(0);
+  const assistantsMap = useAssistantsMapContext();
+  const setShowPopover = useSetRecoilState(popoverAtom);
   const {
     options,
     presets,
+    isLoading,
     modelSpecs,
     agentsList,
     modelsConfig,
     endpointsConfig,
     assistantListMap,
-  } = useMentions({ assistantMap: assistantMap || {}, includeAssistants });
+  } = useMentions({ assistantMap: assistantsMap || {}, includeAssistants });
   const { onSelectMention } = useSelectMention({
     presets,
     modelSpecs,
-    assistantMap,
+    assistantsMap,
     endpointsConfig,
+    getConversation,
     newConversation,
   });
 
@@ -53,6 +66,14 @@ export default function Mention({
     options: inputOptions,
   });
 
+  const initInputRef = useInitPopoverInput({
+    inputRef,
+    textAreaRef,
+    commandChar,
+    setSearchValue,
+    setOpen,
+  });
+
   const handleSelect = (mention?: MentionOption) => {
     if (!mention) {
       return;
@@ -61,8 +82,8 @@ export default function Mention({
     const defaultSelect = () => {
       setSearchValue('');
       setOpen(false);
-      setShowMentionPopover(false);
-      onSelectMention(mention);
+      setShowPopover(false);
+      onSelectMention?.(mention);
 
       if (textAreaRef.current) {
         removeCharIfLast(textAreaRef.current, commandChar);
@@ -108,6 +129,10 @@ export default function Mention({
   }, [open, options]);
 
   useEffect(() => {
+    setActiveIndex((prev) => Math.min(prev, Math.max(matches.length - 1, 0)));
+  }, [matches.length]);
+
+  useEffect(() => {
     return () => {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -121,29 +146,72 @@ export default function Mention({
     currentActiveItem?.scrollIntoView({ behavior: 'instant', block: 'nearest' });
   }, [type, activeIndex]);
 
+  const rowRenderer = ({
+    index,
+    key,
+    style,
+  }: {
+    index: number;
+    key: string;
+    style: React.CSSProperties;
+  }) => {
+    const mention = matches[index] as MentionOption;
+    return (
+      <MentionItem
+        type={type}
+        index={index}
+        key={key}
+        style={style}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current);
+          }
+          timeoutRef.current = null;
+          handleSelect(mention);
+        }}
+        name={mention.label ?? ''}
+        icon={mention.icon}
+        description={mention.description}
+        isActive={index === activeIndex}
+      />
+    );
+  };
+
   return (
-    <div className="absolute bottom-16 z-10 w-full space-y-2">
-      <div className="popover border-token-border-light rounded-2xl border bg-white p-2 shadow-lg dark:bg-gray-700">
-        <input
-          // The user expects focus to transition to the input field when the popover is opened
-          // eslint-disable-next-line jsx-a11y/no-autofocus
-          autoFocus
-          ref={inputRef}
+    <div className="absolute bottom-28 z-10 w-full space-y-2">
+      <div className="popover border-token-border-light rounded-2xl border bg-surface-secondary p-2 shadow-lg">
+        <Input
+          ref={initInputRef}
           placeholder={localize(placeholder)}
-          className="mb-1 w-full border-0 bg-white p-2 text-sm focus:outline-none dark:bg-gray-700 dark:text-gray-200"
+          className="mb-1 h-auto w-full rounded-none border-0 bg-surface-secondary p-2 text-sm text-text-primary focus:outline-none"
           autoComplete="off"
           value={searchValue}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
               setOpen(false);
-              setShowMentionPopover(false);
+              setShowPopover(false);
               textAreaRef.current?.focus();
             }
             if (e.key === 'ArrowDown') {
+              if (matches.length === 0) {
+                return;
+              }
               setActiveIndex((prevIndex) => (prevIndex + 1) % matches.length);
             } else if (e.key === 'ArrowUp') {
+              if (matches.length === 0) {
+                return;
+              }
               setActiveIndex((prevIndex) => (prevIndex - 1 + matches.length) % matches.length);
             } else if (e.key === 'Enter' || e.key === 'Tab') {
+              if (matches.length === 0) {
+                e.preventDefault();
+                setOpen(false);
+                setShowPopover(false);
+                textAreaRef.current?.focus();
+                return;
+              }
               const mentionOption = matches[activeIndex] as MentionOption | undefined;
               if (mentionOption?.type === 'endpoint') {
                 e.preventDefault();
@@ -153,7 +221,7 @@ export default function Mention({
               handleSelect(matches[activeIndex] as MentionOption);
             } else if (e.key === 'Backspace' && searchValue === '') {
               setOpen(false);
-              setShowMentionPopover(false);
+              setShowPopover(false);
               textAreaRef.current?.focus();
             }
           }}
@@ -162,35 +230,47 @@ export default function Mention({
           onBlur={() => {
             timeoutRef.current = setTimeout(() => {
               setOpen(false);
-              setShowMentionPopover(false);
+              setShowPopover(false);
             }, 150);
           }}
         />
-        {open && (
-          <div className="max-h-40 overflow-y-auto">
-            {(matches as MentionOption[]).map((mention, index) => (
-              <MentionItem
-                type={type}
-                index={index}
-                key={`${mention.value}-${index}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (timeoutRef.current) {
-                    clearTimeout(timeoutRef.current);
-                  }
-                  timeoutRef.current = null;
-                  handleSelect(mention);
-                }}
-                name={mention.label ?? ''}
-                icon={mention.icon}
-                description={mention.description}
-                isActive={index === activeIndex}
-              />
-            ))}
+        {open && isLoading && matches.length === 0 && (
+          <div className="flex h-32 items-center justify-center text-text-primary">
+            <Spinner />
+          </div>
+        )}
+        {open && matches.length > 0 && (
+          <div className="max-h-40">
+            <AutoSizer disableHeight>
+              {({ width }) => (
+                <List
+                  width={width}
+                  overscanRowCount={5}
+                  rowHeight={ROW_HEIGHT}
+                  rowCount={matches.length}
+                  rowRenderer={rowRenderer}
+                  scrollToIndex={activeIndex}
+                  height={Math.min(matches.length * ROW_HEIGHT, 160)}
+                />
+              )}
+            </AutoSizer>
           </div>
         )}
       </div>
     </div>
   );
 }
+
+const MentionPopoverContainer = memo(function MentionPopoverContainer({
+  index: _index,
+  popoverAtom,
+  ...rest
+}: MentionProps) {
+  const show = useRecoilValue(popoverAtom);
+  if (!show) {
+    return null;
+  }
+  return <MentionContent popoverAtom={popoverAtom} {...rest} />;
+});
+
+export default MentionPopoverContainer;

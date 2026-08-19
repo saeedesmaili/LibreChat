@@ -1,102 +1,156 @@
-const { parseCompactConvo, EModelEndpoint, isAgentsEndpoint } = require('librechat-data-provider');
-const { getModelsConfig } = require('~/server/controllers/ModelController');
+const {
+  handleError,
+  applyModelSpecPreset,
+  findModelSpecByName,
+  isModelSpecEndpointMatch,
+  resolveModelSpecPromptPrefixVariables,
+} = require('@librechat/api');
+const { logger } = require('@librechat/data-schemas');
+const {
+  EndpointURLs,
+  EModelEndpoint,
+  isAgentsEndpoint,
+  parseCompactConvo,
+  getDefaultParamsEndpoint,
+} = require('librechat-data-provider');
 const azureAssistants = require('~/server/services/Endpoints/azureAssistants');
 const assistants = require('~/server/services/Endpoints/assistants');
-const gptPlugins = require('~/server/services/Endpoints/gptPlugins');
-const { processFiles } = require('~/server/services/Files/process');
-const anthropic = require('~/server/services/Endpoints/anthropic');
-const bedrock = require('~/server/services/Endpoints/bedrock');
-const openAI = require('~/server/services/Endpoints/openAI');
+const { getEndpointsConfig } = require('~/server/services/Config');
 const agents = require('~/server/services/Endpoints/agents');
-const custom = require('~/server/services/Endpoints/custom');
-const google = require('~/server/services/Endpoints/google');
-const { getConvoFiles } = require('~/models/Conversation');
-const { handleError } = require('~/server/utils');
+const { updateFilesUsage } = require('~/models');
 
 const buildFunction = {
-  [EModelEndpoint.openAI]: openAI.buildOptions,
-  [EModelEndpoint.google]: google.buildOptions,
-  [EModelEndpoint.custom]: custom.buildOptions,
   [EModelEndpoint.agents]: agents.buildOptions,
-  [EModelEndpoint.bedrock]: bedrock.buildOptions,
-  [EModelEndpoint.azureOpenAI]: openAI.buildOptions,
-  [EModelEndpoint.anthropic]: anthropic.buildOptions,
-  [EModelEndpoint.gptPlugins]: gptPlugins.buildOptions,
   [EModelEndpoint.assistants]: assistants.buildOptions,
   [EModelEndpoint.azureAssistants]: azureAssistants.buildOptions,
 };
 
 async function buildEndpointOption(req, res, next) {
   const { endpoint, endpointType } = req.body;
+  const isAgents =
+    isAgentsEndpoint(endpoint) || req.baseUrl.startsWith(EndpointURLs[EModelEndpoint.agents]);
+
+  let endpointsConfig;
+  try {
+    endpointsConfig = await getEndpointsConfig(req);
+  } catch (error) {
+    logger.error('Error fetching endpoints config in buildEndpointOption', error);
+  }
+
+  const defaultParamsEndpoint = getDefaultParamsEndpoint(endpointsConfig, endpoint);
+
   let parsedBody;
   try {
-    parsedBody = parseCompactConvo({ endpoint, endpointType, conversation: req.body });
+    parsedBody = parseCompactConvo({
+      endpoint,
+      endpointType,
+      conversation: req.body,
+      defaultParamsEndpoint,
+    });
   } catch (error) {
+    logger.error(`Error parsing compact conversation for endpoint ${endpoint}`, error);
+    logger.debug({
+      'Error parsing compact conversation': { endpoint, endpointType, conversation: req.body },
+    });
     return handleError(res, { text: 'Error parsing conversation' });
   }
 
-  if (req.app.locals.modelSpecs?.list && req.app.locals.modelSpecs?.enforce) {
+  const appConfig = req.config;
+  let appliedModelSpecPrivateFields = new Set();
+  if (appConfig.modelSpecs?.list?.length && appConfig.modelSpecs?.enforce) {
     /** @type {{ list: TModelSpec[] }}*/
-    const { list } = req.app.locals.modelSpecs;
-    const { spec } = parsedBody;
+    const { list } = appConfig.modelSpecs;
+    const rawSpec = req.body.spec;
+    const spec = parsedBody.spec ?? (typeof rawSpec === 'string' ? rawSpec : undefined);
+    const rawChatProjectId = req.body.chatProjectId;
+    const parsedBodyForModelSpec =
+      parsedBody.chatProjectId === undefined &&
+      (typeof rawChatProjectId === 'string' || rawChatProjectId === null)
+        ? { ...parsedBody, chatProjectId: rawChatProjectId }
+        : parsedBody;
 
     if (!spec) {
       return handleError(res, { text: 'No model spec selected' });
     }
 
-    const currentModelSpec = list.find((s) => s.name === spec);
+    const currentModelSpec = findModelSpecByName({ list }, spec);
     if (!currentModelSpec) {
       return handleError(res, { text: 'Invalid model spec' });
     }
 
-    if (endpoint !== currentModelSpec.preset.endpoint) {
+    if (!isModelSpecEndpointMatch(currentModelSpec, endpoint)) {
       return handleError(res, { text: 'Model spec mismatch' });
     }
 
-    if (
-      currentModelSpec.preset.endpoint !== EModelEndpoint.gptPlugins &&
-      currentModelSpec.preset.tools
-    ) {
-      return handleError(res, {
-        text: `Only the "${EModelEndpoint.gptPlugins}" endpoint can have tools defined in the preset`,
-      });
-    }
-
     try {
-      parsedBody = parseCompactConvo({
+      const result = applyModelSpecPreset({
+        modelSpec: currentModelSpec,
+        parsedBody: parsedBodyForModelSpec,
         endpoint,
         endpointType,
-        conversation: currentModelSpec.preset,
+        defaultParamsEndpoint,
+        includePresetDefaults: true,
       });
+      parsedBody = result.parsedBody;
+      appliedModelSpecPrivateFields = result.appliedPrivateFields;
     } catch (error) {
+      logger.error(`Error parsing model spec for endpoint ${endpoint}`, error);
       return handleError(res, { text: 'Error parsing model spec' });
+    }
+  } else if (parsedBody.spec && appConfig.modelSpecs?.list) {
+    const modelSpec = findModelSpecByName(appConfig.modelSpecs, parsedBody.spec);
+    if (modelSpec) {
+      if (!isModelSpecEndpointMatch(modelSpec, endpoint)) {
+        return handleError(res, { text: 'Model spec mismatch' });
+      }
+
+      try {
+        const result = applyModelSpecPreset({
+          modelSpec,
+          parsedBody,
+          endpoint,
+          endpointType,
+          defaultParamsEndpoint,
+        });
+        parsedBody = result.parsedBody;
+        appliedModelSpecPrivateFields = result.appliedPrivateFields;
+      } catch (error) {
+        logger.error(`Error parsing model spec for endpoint ${endpoint}`, error);
+        return handleError(res, { text: 'Error parsing model spec' });
+      }
     }
   }
 
+  if (!isAgents && appliedModelSpecPrivateFields.has('promptPrefix')) {
+    parsedBody = resolveModelSpecPromptPrefixVariables(
+      parsedBody,
+      req.user,
+      req.body.clientTimestamp,
+    );
+  }
+
   try {
-    const isAgents = isAgentsEndpoint(endpoint);
-    const endpointFn = buildFunction[endpointType ?? endpoint];
-    const builder = isAgents ? (...args) => endpointFn(req, ...args) : endpointFn;
+    const builder = isAgents
+      ? (...args) => buildFunction[EModelEndpoint.agents](req, ...args)
+      : buildFunction[endpointType ?? endpoint];
 
     // TODO: use object params
-    req.body.endpointOption = builder(endpoint, parsedBody, endpointType);
+    req.body = req.body || {}; // Express 5: ensure req.body exists
+    req.body.endpointOption = await builder(endpoint, parsedBody, endpointType);
 
-    // TODO: use `getModelsConfig` only when necessary
-    const modelsConfig = await getModelsConfig(req);
-    const { resendFiles = true } = req.body.endpointOption;
-    req.body.endpointOption.modelsConfig = modelsConfig;
-    if (isAgents && resendFiles && req.body.conversationId) {
-      const fileIds = await getConvoFiles(req.body.conversationId);
-      const requestFiles = req.body.files ?? [];
-      if (requestFiles.length || fileIds.length) {
-        req.body.endpointOption.attachments = processFiles(requestFiles, fileIds);
-      }
-    } else if (req.body.files) {
-      // hold the promise
-      req.body.endpointOption.attachments = processFiles(req.body.files);
+    if (req.body.files && !isAgents) {
+      req.body.endpointOption.attachments = updateFilesUsage(req.body.files, undefined, {
+        user: req.user.id,
+        tenantId: req.user.tenantId,
+      });
     }
+
     next();
   } catch (error) {
+    logger.error(
+      `Error building endpoint option for endpoint ${endpoint} with type ${endpointType}`,
+      error,
+    );
     return handleError(res, { text: 'Error building endpoint option' });
   }
 }

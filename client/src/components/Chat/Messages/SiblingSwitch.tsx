@@ -1,13 +1,21 @@
+import { Button } from '@librechat/client';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { TMessageProps } from '~/common';
+import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
-type TSiblingSwitchProps = Pick<TMessageProps, 'siblingIdx' | 'siblingCount' | 'setSiblingIdx'>;
+type TSiblingSwitchProps = Pick<TMessageProps, 'siblingIdx' | 'siblingCount' | 'setSiblingIdx'> & {
+  className?: string;
+};
 
 export default function SiblingSwitch({
   siblingIdx,
   siblingCount,
   setSiblingIdx,
+  className,
 }: TSiblingSwitchProps) {
+  const localize = useLocalize();
+
   if (siblingIdx === undefined) {
     return null;
   } else if (siblingCount === undefined) {
@@ -22,57 +30,49 @@ export default function SiblingSwitch({
     setSiblingIdx && setSiblingIdx(siblingIdx + 1);
   };
 
+  const buttonStyle = cn(
+    'hover-button h-auto rounded-lg p-1.5 text-text-secondary-alt',
+    'hover:text-text-primary hover:bg-surface-hover',
+    'group-hover:visible group-focus-visible:visible group-has-[:focus-visible:not(:is(input,textarea,[contenteditable]))]:visible group-[.final-completion]:visible',
+    'focus-visible:ring-2 focus-visible:ring-text-primary focus-visible:outline-none',
+  );
+
   return siblingCount > 1 ? (
-    <div className="visible flex items-center justify-center gap-1 self-center pt-0 text-xs">
-      <button
-        className={cn(
-          'hover-button rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-500 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-        )}
-        type="button"
+    <nav
+      className={cn(
+        'visible flex items-center justify-center gap-2 self-center pt-0 text-xs',
+        className,
+      )}
+      aria-label={localize('com_ui_sibling_navigation')}
+    >
+      <Button
+        variant="ghost"
+        className={buttonStyle}
         onClick={previous}
         disabled={siblingIdx == 0}
+        aria-label={localize('com_ui_previous_sibling')}
+        aria-disabled={siblingIdx == 0}
       >
-        <svg
-          stroke="currentColor"
-          fill="none"
-          strokeWidth="1.5"
-          viewBox="0 0 24 24"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-4 w-4"
-          height="1em"
-          width="1em"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <polyline points="15 18 9 12 15 6" />
-        </svg>
-      </button>
-      <span className="flex-shrink-0 flex-grow tabular-nums">
+        <ChevronLeft size="19" aria-hidden="true" />
+      </Button>
+      <span
+        className="flex-shrink-0 flex-grow tabular-nums"
+        aria-live="polite"
+        aria-atomic="true"
+        role="status"
+      >
         {siblingIdx + 1} / {siblingCount}
       </span>
-      <button
-        className={cn(
-          'hover-button rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-500 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-        )}
-        type="button"
+      <Button
+        variant="ghost"
+        className={buttonStyle}
         onClick={next}
         disabled={siblingIdx == siblingCount - 1}
+        aria-label={localize('com_ui_next_sibling')}
+        aria-disabled={siblingIdx == siblingCount - 1}
       >
-        <svg
-          stroke="currentColor"
-          fill="none"
-          strokeWidth="1.5"
-          viewBox="0 0 24 24"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-4 w-4"
-          height="1em"
-          width="1em"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
-      </button>
-    </div>
+        <ChevronRight size="19" aria-hidden="true" />
+      </Button>
+    </nav>
   ) : null;
 }
